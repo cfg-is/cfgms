@@ -141,6 +141,34 @@ func sanitizeCertLabel(label string) string {
 	return b.String()
 }
 
+// accountInCertScope loads the account named by username for a certificate-binding write
+// and enforces the caller's tenant scope, or writes the refusal and returns false: 500 on
+// a store error, 404 for an unknown account and 403 (or the tenant-crossing response) for
+// a caller outside the account's tenant subtree, whatever binding state exists. op names
+// the operation in the store-error log.
+func (s *Server) accountInCertScope(w http.ResponseWriter, r *http.Request, username, op, route string) (*account, bool) {
+	// Load outside lock — getAccount calls cacheAccount, which acquires s.mu.Lock internally.
+	acct, err := s.getAccount(r.Context(), username)
+	if err != nil {
+		s.logger.Error("Failed to look up account for "+op,
+			"error", logging.SanitizeLogValue(err.Error()),
+			"username", logging.SanitizeLogValue(username))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
+		return nil, false
+	}
+	if acct == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
+		return nil, false
+	}
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), acct.TenantID, route); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
+			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
+		}
+		return nil, false
+	}
+	return acct, true
+}
+
 // handleBindCert handles POST /api/v1/accounts/{username}/certs/bind.
 //
 // Binds a certificate serial to the named account. Rejects with 409 CONFLICT if
@@ -208,35 +236,17 @@ func (s *Server) handleBindCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingPrincipalID := ""
-	if principal != nil {
-		actingPrincipalID = principal.ID
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
 	}
+	actingPrincipalID := principal.ID
 
 	// Load the target account before acquiring s.mu.Lock — loadAccountFromStore (called
 	// transitively by getAccount) calls cacheAccount, which acquires s.mu.Lock internally.
 	// Calling getAccount under an already-held s.mu.Lock would deadlock.
-	acct, err := s.getAccount(r.Context(), username)
-	if err != nil {
-		s.logger.Error("Failed to look up account for cert bind",
-			"error", logging.SanitizeLogValue(err.Error()),
-			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
-		return
-	}
-	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
-		return
-	}
-
-	// Tenant isolation: reject callers that are outside the account's tenant subtree.
-	// An out-of-subtree caller receives 403 regardless of whether any binding exists —
-	// leaking binding state would create an existence oracle across tenants.
-	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), acct.TenantID, "POST /api/v1/accounts/{username}/certs/bind"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
-			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
-		}
+	acct, ok := s.accountInCertScope(w, r, username, "cert bind", "POST /api/v1/accounts/{username}/certs/bind")
+	if !ok {
 		return
 	}
 
@@ -391,31 +401,15 @@ func (s *Server) handleRevokeCertBinding(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingPrincipalID := ""
-	if principal != nil {
-		actingPrincipalID = principal.ID
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
 	}
+	actingPrincipalID := principal.ID
 
 	// Load outside lock — getAccount calls cacheAccount which acquires s.mu.Lock internally.
-	acct, err := s.getAccount(r.Context(), username)
-	if err != nil {
-		s.logger.Error("Failed to look up account for cert revoke",
-			"error", logging.SanitizeLogValue(err.Error()),
-			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
-		return
-	}
-	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
-		return
-	}
-
-	// Tenant isolation: an out-of-subtree caller receives 403 regardless of binding state.
-	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), acct.TenantID, "POST /api/v1/accounts/{username}/certs/revoke/{serial}"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
-			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
-		}
+	acct, ok := s.accountInCertScope(w, r, username, "cert revoke", "POST /api/v1/accounts/{username}/certs/revoke/{serial}")
+	if !ok {
 		return
 	}
 
@@ -689,30 +683,15 @@ func (s *Server) handleRotateCert(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingPrincipalID := ""
-	if principal != nil {
-		actingPrincipalID = principal.ID
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
 	}
+	actingPrincipalID := principal.ID
 
 	// Load account outside lock — getAccount calls cacheAccount, which acquires s.mu.Lock internally.
-	acct, err := s.getAccount(r.Context(), username)
-	if err != nil {
-		s.logger.Error("Failed to look up account for cert rotation",
-			"error", logging.SanitizeLogValue(err.Error()),
-			"username", logging.SanitizeLogValue(username))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up account", "STORE_ERROR")
-		return
-	}
-	if acct == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Account not found", "ACCOUNT_NOT_FOUND")
-		return
-	}
-
-	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), acct.TenantID, "POST /api/v1/accounts/{username}/certs/rotate/{old_serial}"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, acct.TenantID) {
-			s.writeErrorResponse(w, http.StatusForbidden, "Access to this account is not permitted", "FORBIDDEN")
-		}
+	acct, ok := s.accountInCertScope(w, r, username, "cert rotation", "POST /api/v1/accounts/{username}/certs/rotate/{old_serial}")
+	if !ok {
 		return
 	}
 

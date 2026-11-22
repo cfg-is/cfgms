@@ -81,9 +81,8 @@ func (s *Server) handlePutLibraryMode(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if principal == nil || principal.ID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 	mode, ok := s.decodeLibraryModeRequest(w, r)

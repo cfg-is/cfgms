@@ -101,18 +101,18 @@ func (s *Server) openAutomationRun(ctx context.Context, grantTenant, grantID str
 // It verifies the declared tenant is the grant tenant or one of its descendants, then
 // creates the durable binding that makes the declaration immutable.
 func (s *Server) handleAutomationRunBegin(w http.ResponseWriter, r *http.Request) {
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	grantID, ownerTenant := "", ""
-	if principal != nil {
-		grantID, ownerTenant = principal.ID, principal.TenantID
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
 	}
+	grantID, ownerTenant := principal.ID, principal.TenantID
 	refuse := func(rej *beginRejection) {
 		s.emitAutomationAudit(r.Context(), grantID, "", rej.tenant, ownerTenant, rej.eref,
 			"automation.run.begin", business.AuditResultDenied, auditDetail{Key: "reason", Value: rej.reason})
 		s.writeErrorResponse(w, rej.status, rej.message, rej.code)
 	}
 
-	if principal == nil || principal.Channel != AuthChannelAutomationGrant {
+	if principal.Channel != AuthChannelAutomationGrant {
 		refuse(&beginRejection{http.StatusForbidden, "The automation run does not permit this request",
 			"AUTOMATION_RUN_DENIED", "not_a_grant_principal", "", ""})
 		return

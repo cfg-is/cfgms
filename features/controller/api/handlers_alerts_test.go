@@ -288,7 +288,7 @@ func TestHandleUnsilenceAlert_CrossTenant(t *testing.T) {
 	call := func(tenant string) int {
 		req := httptest.NewRequest("POST", "/api/v1/alerts/shared-alert/unsilence", nil)
 		req = mux.SetURLVars(req, map[string]string{"id": "shared-alert"})
-		req = req.WithContext(withCallerTenant(req.Context(), tenant))
+		req = req.WithContext(withActor(withCallerTenant(req.Context(), tenant), &Principal{ID: "operator-1", TenantID: tenant}))
 		rec := httptest.NewRecorder()
 		server.handleUnsilenceAlert(rec, req)
 		return rec.Code

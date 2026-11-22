@@ -489,44 +489,100 @@ func (s *Server) handleMintEnrolmentToken(w http.ResponseWriter, r *http.Request
 	s.writeResponse(w, http.StatusCreated, enrolmentTokenToResponse(tok, rawToken))
 }
 
+// scopedLookup describes one record kind a handler resolves from the {id} route variable
+// before acting on it: how to read it, whose tenant owns it and how its absence is worded.
+type scopedLookup[T any] struct {
+	label    string // used in the log line for a store error, e.g. "enrolment token"
+	notFound string // 404 message
+	code     string // 404 error code
+	get      func(ctx context.Context, id string) (*T, error)
+	tenant   func(rec *T) string
+}
+
+// recordInCallerScope resolves the {id} route variable to a record the caller's tenant
+// scope covers, or writes the refusal and returns false: 503 without a secret store, 400
+// for a missing id, 500 on a store error, and the same 404 whether the record is absent
+// or outside the caller's subtree (no existence disclosure).
+func recordInCallerScope[T any](s *Server, w http.ResponseWriter, r *http.Request, route string, l scopedLookup[T]) (*T, bool) {
+	if s.secretStore == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
+		return nil, false
+	}
+	id := mux.Vars(r)["id"]
+	if id == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "id is required", "MISSING_ID")
+		return nil, false
+	}
+	rec, err := l.get(r.Context(), id)
+	if err != nil {
+		s.logger.Error("Failed to look up "+l.label, "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up "+l.label, "STORE_ERROR")
+		return nil, false
+	}
+	if rec == nil {
+		s.writeErrorResponse(w, http.StatusNotFound, l.notFound, l.code)
+		return nil, false
+	}
+	owner := l.tenant(rec)
+	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), owner, route); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, owner) {
+			s.writeErrorResponse(w, http.StatusNotFound, l.notFound, l.code)
+		}
+		return nil, false
+	}
+	return rec, true
+}
+
+// enrolmentTokenInCallerScope resolves the {id} route variable to an enrolment token the
+// caller's tenant scope covers (see recordInCallerScope).
+func (s *Server) enrolmentTokenInCallerScope(w http.ResponseWriter, r *http.Request, route string) (*enrolmentToken, bool) {
+	return recordInCallerScope(s, w, r, route, scopedLookup[enrolmentToken]{
+		label: "enrolment token", notFound: "Enrolment token not found", code: "TOKEN_NOT_FOUND",
+		get:    s.getEnrolmentTokenByID,
+		tenant: func(t *enrolmentToken) string { return t.TenantID },
+	})
+}
+
+// credentialRequestInCallerScope is enrolmentTokenInCallerScope for the credential
+// request named by the {id} route variable.
+func (s *Server) credentialRequestInCallerScope(w http.ResponseWriter, r *http.Request, route string) (*pendingCredentialRequest, bool) {
+	return recordInCallerScope(s, w, r, route, scopedLookup[pendingCredentialRequest]{
+		label: "credential request", notFound: "Credential request not found", code: "REQUEST_NOT_FOUND",
+		get:    s.getPendingCredentialRequestByID,
+		tenant: func(q *pendingCredentialRequest) string { return q.TenantID },
+	})
+}
+
+// refuseUnrevocableEnrolmentToken writes the 409 for a token whose one use is already
+// consumed or which is already revoked, and reports whether it did.
+func (s *Server) refuseUnrevocableEnrolmentToken(w http.ResponseWriter, tok *enrolmentToken) bool {
+	switch {
+	case tok.SpentAt != nil:
+		s.writeErrorResponse(w, http.StatusConflict, "Enrolment token has already been spent", "TOKEN_ALREADY_SPENT")
+	case tok.Revoked:
+		s.writeErrorResponse(w, http.StatusConflict, "Enrolment token is already revoked", "TOKEN_ALREADY_REVOKED")
+	default:
+		return false
+	}
+	return true
+}
+
 // handleRevokeEnrolmentToken handles POST /api/v1/enrolment-tokens/{id}/revoke.
 // Revokes an unspent token so it can never be used to lodge a request. A token that
 // has already been spent is not revocable — its one use is already consumed.
 func (s *Server) handleRevokeEnrolmentToken(w http.ResponseWriter, r *http.Request) {
-	if s.secretStore == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
-		return
-	}
-
-	id := mux.Vars(r)["id"]
-	if id == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "id is required", "MISSING_ID")
-		return
-	}
-	tok, err := s.getEnrolmentTokenByID(r.Context(), id)
-	if err != nil {
-		s.logger.Error("Failed to look up enrolment token", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up enrolment token", "STORE_ERROR")
-		return
-	}
-	if tok == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Enrolment token not found", "TOKEN_NOT_FOUND")
-		return
-	}
 	// Tenant subtree enforcement before any state disclosure (404, not 403 — no
 	// existence disclosure across tenants), matching handleRevokeRegistrationToken.
-	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), tok.TenantID, "POST /api/v1/enrolment-tokens/{id}/revoke"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, tok.TenantID) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Enrolment token not found", "TOKEN_NOT_FOUND")
-		}
+	tok, ok := s.enrolmentTokenInCallerScope(w, r, "POST /api/v1/enrolment-tokens/{id}/revoke")
+	if !ok {
 		return
 	}
-	if tok.SpentAt != nil {
-		s.writeErrorResponse(w, http.StatusConflict, "Enrolment token has already been spent", "TOKEN_ALREADY_SPENT")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
-	if tok.Revoked {
-		s.writeErrorResponse(w, http.StatusConflict, "Enrolment token is already revoked", "TOKEN_ALREADY_REVOKED")
+	actingID := principal.ID
+	if s.refuseUnrevocableEnrolmentToken(w, tok) {
 		return
 	}
 
@@ -539,11 +595,6 @@ func (s *Server) handleRevokeEnrolmentToken(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	actingID := ""
-	if principal != nil {
-		actingID = principal.ID
-	}
 	s.logger.Info("Enrolment token revoked",
 		"token_id", logging.SanitizeLogValue(tok.ID),
 		"token_prefix", logging.SanitizeLogValue(tok.TokenPrefix))
@@ -844,30 +895,12 @@ func (s *Server) handleListEnrolmentTokens(w http.ResponseWriter, r *http.Reques
 // Marks a pending request denied so it can never later be approved or collected —
 // a terminal transition (Issue #3717 AC).
 func (s *Server) handleDenyCredentialRequest(w http.ResponseWriter, r *http.Request) {
-	if s.secretStore == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Secret store not available", "SERVICE_UNAVAILABLE")
+	reqRecord, ok := s.credentialRequestInCallerScope(w, r, "POST /api/v1/credential-requests/{id}/deny")
+	if !ok {
 		return
 	}
-
-	id := mux.Vars(r)["id"]
-	if id == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "id is required", "MISSING_ID")
-		return
-	}
-	reqRecord, err := s.getPendingCredentialRequestByID(r.Context(), id)
-	if err != nil {
-		s.logger.Error("Failed to look up credential request", "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to look up credential request", "STORE_ERROR")
-		return
-	}
-	if reqRecord == nil {
-		s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
-		return
-	}
-	if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), reqRecord.TenantID, "POST /api/v1/credential-requests/{id}/deny"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, reqRecord.TenantID) {
-			s.writeErrorResponse(w, http.StatusNotFound, "Credential request not found", "REQUEST_NOT_FOUND")
-		}
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 	if reqRecord.Status != credentialRequestStatusPending {
@@ -887,10 +920,7 @@ func (s *Server) handleDenyCredentialRequest(w http.ResponseWriter, r *http.Requ
 	now := time.Now().UTC()
 	reqRecord.Status = credentialRequestStatusDenied
 	reqRecord.DeniedAt = &now
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if principal != nil {
-		reqRecord.DeniedBy = principal.ID
-	}
+	reqRecord.DeniedBy = principal.ID
 
 	if err := s.persistPendingCredentialRequest(r.Context(), reqRecord); err != nil {
 		s.logger.Error("Failed to persist credential request denial", "error", logging.SanitizeLogValue(err.Error()))

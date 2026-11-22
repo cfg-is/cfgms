@@ -45,11 +45,11 @@ func (s *Server) handleAcknowledgeAlert(w http.ResponseWriter, r *http.Request) 
 	}
 
 	callerTenant := callerTenantFilter(r.Context())
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	principalID := ""
-	if principal != nil {
-		principalID = principal.ID
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
 	}
+	principalID := principal.ID
 
 	now := time.Now().UTC()
 	if err := s.alertStore.AcknowledgeAlert(r.Context(), callerTenant, alertID, principalID, now); err != nil {
@@ -95,11 +95,11 @@ func (s *Server) handleSilenceAlert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	callerTenant := callerTenantFilter(r.Context())
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	principalID := ""
-	if principal != nil {
-		principalID = principal.ID
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
 	}
+	principalID := principal.ID
 
 	if err := s.alertStore.SilenceAlert(r.Context(), callerTenant, alertID, principalID, req.Until); err != nil {
 		s.logger.Error("Failed to silence alert",
@@ -146,11 +146,11 @@ func (s *Server) handleUnsilenceAlert(w http.ResponseWriter, r *http.Request) {
 	}
 
 	callerTenant := callerTenantFilter(r.Context())
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	principalID := ""
-	if principal != nil {
-		principalID = principal.ID
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
 	}
+	principalID := principal.ID
 
 	if err := s.alertStore.UnsilenceAlert(r.Context(), callerTenant, alertID, principalID, time.Now().UTC()); err != nil {
 		if errors.Is(err, business.ErrAlertNotFound) {
