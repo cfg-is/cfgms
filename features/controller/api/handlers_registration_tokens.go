@@ -51,6 +51,35 @@ type createTokenRequestWithSingleUseCheck struct {
 	SingleUse *bool `json:"single_use,omitempty"`
 }
 
+// decodeCreateTokenRequest parses and validates the create body: the removed single_use
+// field is refused, and tenant_id, controller_url and the label must be valid. On false
+// the 400 has been written.
+func (s *Server) decodeCreateTokenRequest(w http.ResponseWriter, r *http.Request) (*createTokenRequestWithSingleUseCheck, bool) {
+	var req createTokenRequestWithSingleUseCheck
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.logger.Warn("Failed to parse token create request", "error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return nil, false
+	}
+	if req.SingleUse != nil {
+		http.Error(w, "single_use is not supported by this token format; newly issued tokens are short-lived by default", http.StatusBadRequest)
+		return nil, false
+	}
+	if req.TenantID == "" {
+		http.Error(w, "tenant_id is required", http.StatusBadRequest)
+		return nil, false
+	}
+	if req.ControllerURL == "" {
+		http.Error(w, "controller_url is required", http.StatusBadRequest)
+		return nil, false
+	}
+	if err := registration.ValidateLabel(req.Label); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return nil, false
+	}
+	return &req, true
+}
+
 // handleCreateRegistrationToken handles POST /api/v1/registration/tokens
 func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -58,30 +87,13 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Parse request body; detect removed single_use field.
-	var req createTokenRequestWithSingleUseCheck
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.logger.Warn("Failed to parse token create request", "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 
-	if req.SingleUse != nil {
-		http.Error(w, "single_use is not supported by this token format; newly issued tokens are short-lived by default", http.StatusBadRequest)
-		return
-	}
-
-	// Validate required fields
-	if req.TenantID == "" {
-		http.Error(w, "tenant_id is required", http.StatusBadRequest)
-		return
-	}
-	if req.ControllerURL == "" {
-		http.Error(w, "controller_url is required", http.StatusBadRequest)
-		return
-	}
-	if err := registration.ValidateLabel(req.Label); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	req, ok := s.decodeCreateTokenRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -122,7 +134,7 @@ func (s *Server) handleCreateRegistrationToken(w http.ResponseWriter, r *http.Re
 	s.logger.Info("Created registration token",
 		"token_prefix", token.Token[:min(len(token.Token), 6)],
 		"tenant_id", logging.SanitizeLogValue(token.TenantID))
-	s.emitTokenManagementAudit(r, "registration_token.created",
+	s.emitTokenManagementAudit(r, principal.ID, "registration_token.created",
 		token.Token[:min(len(token.Token), 6)], token.ID, token.TenantID, token.Label)
 
 	// Return full token response — create is the one-time mint window where the secret is disclosed.
@@ -275,30 +287,25 @@ func (s *Server) handleGetRegistrationToken(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// handleDeleteRegistrationToken handles DELETE /api/v1/registration/tokens/{token}
-func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Check if registration token store is available
+// scopedTokenFromPath resolves the {token} path value to a stored token for a verb that
+// changes it, and checks it against the caller's tenant scope. The value is the full
+// token (mTLS admin) or its UUID (web UI). It answers 500 when the store is unwired, 400
+// for an empty value, 404 for an unknown token or one outside the caller's subtree, and
+// 500 with failMsg for a store error; it returns false once the response is written.
+//
+// Tenant subtree enforcement (Issue #4336): scoped callers may not change tokens of other
+// tenants; an unset scope is refused rather than treated as unrestricted.
+func (s *Server) scopedTokenFromPath(w http.ResponseWriter, r *http.Request, route, failMsg string) (*registration.Token, bool) {
 	if s.registrationTokenStore == nil {
 		s.logger.Error("Registration token store not available")
 		http.Error(w, "Registration service unavailable", http.StatusInternalServerError)
-		return
+		return nil, false
 	}
-
-	// Get token from path
-	vars := mux.Vars(r)
-	tokenStr := vars["token"]
+	tokenStr := mux.Vars(r)["token"]
 	if tokenStr == "" {
 		http.Error(w, "Token is required", http.StatusBadRequest)
-		return
+		return nil, false
 	}
-
-	// Look up the token first for tenant scope enforcement and audit.
-	// Try exact match first (mTLS admin with full token), then UUID lookup (web UI).
 	token, err := s.registrationTokenStore.GetToken(r.Context(), tokenStr)
 	if err != nil && strings.Contains(err.Error(), "not found") {
 		token, err = s.registrationTokenStore.GetTokenByID(r.Context(), tokenStr)
@@ -306,20 +313,36 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, "Token not found", http.StatusNotFound)
-			return
+			return nil, false
 		}
-		s.logger.Error("Failed to get registration token for delete", "error", err)
-		http.Error(w, "Failed to delete token", http.StatusInternalServerError)
-		return
+		s.logger.Error("Failed to get registration token", "error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, failMsg, http.StatusInternalServerError)
+		return nil, false
 	}
-
-	// Tenant subtree enforcement (Issue #4336): scoped callers may not delete tokens
-	// from other tenants; an unset scope is refused rather than treated as unrestricted.
 	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if access := s.tenantAccessForScope(r.Context(), scope, token.TenantID, "DELETE /api/v1/registration/tokens/{token}"); access != tenantAuthAllowed {
+	if access := s.tenantAccessForScope(r.Context(), scope, token.TenantID, route); access != tenantAuthAllowed {
 		if !s.writeTenantCrossingIfNeeded(w, access, token.TenantID) {
 			http.Error(w, "Token not found", http.StatusNotFound)
 		}
+		return nil, false
+	}
+	return token, true
+}
+
+// handleDeleteRegistrationToken handles DELETE /api/v1/registration/tokens/{token}
+func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
+	token, ok := s.scopedTokenFromPath(w, r, "DELETE /api/v1/registration/tokens/{token}", "Failed to delete token")
+	if !ok {
 		return
 	}
 
@@ -339,7 +362,7 @@ func (s *Server) handleDeleteRegistrationToken(w http.ResponseWriter, r *http.Re
 	// Use token.Token for the prefix — tokenStr may be a UUID from a web UI caller.
 	tokenPrefix := logging.SanitizeLogValue(token.Token[:min(len(token.Token), 6)])
 	s.logger.Info("Deleted registration token", "token_prefix", tokenPrefix)
-	s.emitTokenManagementAudit(r, "registration_token.deleted", tokenPrefix, token.ID, token.TenantID)
+	s.emitTokenManagementAudit(r, principal.ID, "registration_token.deleted", tokenPrefix, token.ID, token.TenantID)
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -351,44 +374,13 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Check if registration token store is available
-	if s.registrationTokenStore == nil {
-		s.logger.Error("Registration token store not available")
-		http.Error(w, "Registration service unavailable", http.StatusInternalServerError)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 
-	// Get token from path
-	vars := mux.Vars(r)
-	tokenStr := vars["token"]
-	if tokenStr == "" {
-		http.Error(w, "Token is required", http.StatusBadRequest)
-		return
-	}
-
-	// Get token from store.
-	// Try exact match first (mTLS admin with full token), then UUID lookup (web UI).
-	token, err := s.registrationTokenStore.GetToken(r.Context(), tokenStr)
-	if err != nil && strings.Contains(err.Error(), "not found") {
-		token, err = s.registrationTokenStore.GetTokenByID(r.Context(), tokenStr)
-	}
-	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			http.Error(w, "Token not found", http.StatusNotFound)
-			return
-		}
-		s.logger.Error("Failed to get registration token", "error", err)
-		http.Error(w, "Failed to get token", http.StatusInternalServerError)
-		return
-	}
-
-	// Tenant subtree enforcement (Issue #4336): scoped callers may not revoke tokens
-	// from other tenants; an unset scope is refused rather than treated as unrestricted.
-	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if access := s.tenantAccessForScope(r.Context(), scope, token.TenantID, "POST /api/v1/registration/tokens/{token}/revoke"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, token.TenantID) {
-			http.Error(w, "Token not found", http.StatusNotFound)
-		}
+	token, ok := s.scopedTokenFromPath(w, r, "POST /api/v1/registration/tokens/{token}/revoke", "Failed to get token")
+	if !ok {
 		return
 	}
 
@@ -406,7 +398,7 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 	// Use token.Token for the prefix — tokenStr may be a UUID from a web UI caller.
 	tokenPrefix := logging.SanitizeLogValue(token.Token[:min(len(token.Token), 6)])
 	s.logger.Info("Revoked registration token", "token_prefix", tokenPrefix)
-	s.emitTokenManagementAudit(r, "registration_token.revoked", tokenPrefix, token.ID, token.TenantID)
+	s.emitTokenManagementAudit(r, principal.ID, "registration_token.revoked", tokenPrefix, token.ID, token.TenantID)
 
 	// Return redacted response — revoke callers do not receive the raw secret.
 	resp := tokenToResponseRedacted(token)
@@ -418,6 +410,11 @@ func (s *Server) handleRevokeRegistrationToken(w http.ResponseWriter, r *http.Re
 
 // handleRotateRegistrationToken handles POST /api/v1/registration/tokens/{tenant_id}/rotate
 func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	// Check if registration token store is available
 	if s.registrationTokenStore == nil {
 		s.logger.Error("Registration token store not available")
@@ -469,7 +466,7 @@ func (s *Server) handleRotateRegistrationToken(w http.ResponseWriter, r *http.Re
 	s.logger.Info("Rotated registration token",
 		"token_prefix", tokenPrefix,
 		"tenant_id", logging.SanitizeLogValue(tenantID))
-	s.emitTokenManagementAudit(r, "registration_token.rotated", tokenPrefix, newToken.ID, tenantID)
+	s.emitTokenManagementAudit(r, principal.ID, "registration_token.rotated", tokenPrefix, newToken.ID, tenantID)
 
 	// Return full token response — rotate is a mint window where the new secret is disclosed once.
 	resp := tokenToResponse(newToken)
@@ -522,7 +519,7 @@ func tokenToResponseRedacted(token *registration.Token) TokenResponse {
 // tokenID is the stable UUID (registration.Token.ID) — never the secret — recorded
 // as the resource name so the audit trail can be correlated to a token by ID.
 // An optional operator-written label is recorded sanitised as a detail.
-func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, tokenID, tenantID string, label ...string) {
+func (s *Server) emitTokenManagementAudit(r *http.Request, actorID, action, tokenPrefix, tokenID, tenantID string, label ...string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -530,16 +527,11 @@ func (s *Server) emitTokenManagementAudit(r *http.Request, action, tokenPrefix, 
 	if auditTenantID == "" {
 		auditTenantID = audit.SystemTenantID
 	}
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	principalID := ""
-	if principal != nil {
-		principalID = principal.ID
-	}
 	b := audit.NewEventBuilder().
 		Tenant(auditTenantID).
 		Type(business.AuditEventSystemAccess).
 		Action(action).
-		User(principalID, business.AuditUserTypeHuman).
+		User(actorID, business.AuditUserTypeHuman).
 		Resource("registration_token", tokenPrefix, tokenID).
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh)

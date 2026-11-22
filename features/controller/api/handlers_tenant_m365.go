@@ -256,13 +256,9 @@ func (s *Server) m365MSPTenant(w http.ResponseWriter, r *http.Request) *business
 	return td
 }
 
-func (s *Server) m365Audit(r *http.Request, tenantID, action string, details map[string]interface{}) {
+func (s *Server) m365Audit(r *http.Request, actorID, tenantID, action string, details map[string]interface{}) {
 	if s.auditManager == nil {
 		return
-	}
-	var actorID string
-	if p, _ := r.Context().Value(principalContextKey).(*Principal); p != nil {
-		actorID = p.ID
 	}
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
@@ -300,9 +296,27 @@ func m365GetConfig(cs *auth.SecretStoreCredentialStore, tenantID string) (*auth.
 	return cfg, nil
 }
 
+// validate returns the 400 message and code for the first invalid field, or empty
+// strings when the request is valid.
+func (req m365DirectRequest) validate() (msg, code string) {
+	switch {
+	case !validM365ID(req.AppID):
+		return "app_id is required and must be a valid identifier", "INVALID_APP_ID"
+	case !validM365ID(req.M365TenantID):
+		return "m365_tenant_id is required and must be a valid identifier", "INVALID_M365_TENANT_ID"
+	case !validM365Secret(req.ClientSecret):
+		return "client_secret is required", "INVALID_CLIENT_SECRET"
+	}
+	return "", ""
+}
+
 // handlePutTenantM365Connection implements PUT /api/v1/tenants/{id}/m365-connection.
 func (s *Server) handlePutTenantM365Connection(w http.ResponseWriter, r *http.Request) {
 	cs, ok := s.m365Store(w)
+	if !ok {
+		return
+	}
+	principal, ok := s.requireActingPrincipal(w, r)
 	if !ok {
 		return
 	}
@@ -314,15 +328,8 @@ func (s *Server) handlePutTenantM365Connection(w http.ResponseWriter, r *http.Re
 	if !s.m365DecodeBody(w, r, &req) {
 		return
 	}
-	switch {
-	case !validM365ID(req.AppID):
-		s.writeErrorResponse(w, http.StatusBadRequest, "app_id is required and must be a valid identifier", "INVALID_APP_ID")
-		return
-	case !validM365ID(req.M365TenantID):
-		s.writeErrorResponse(w, http.StatusBadRequest, "m365_tenant_id is required and must be a valid identifier", "INVALID_M365_TENANT_ID")
-		return
-	case !validM365Secret(req.ClientSecret):
-		s.writeErrorResponse(w, http.StatusBadRequest, "client_secret is required", "INVALID_CLIENT_SECRET")
+	if msg, code := req.validate(); msg != "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, msg, code)
 		return
 	}
 
@@ -356,7 +363,7 @@ func (s *Server) handlePutTenantM365Connection(w http.ResponseWriter, r *http.Re
 				"error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
-	s.m365Audit(r, td.ID, m365ActionSet, map[string]interface{}{
+	s.m365Audit(r, principal.ID, td.ID, m365ActionSet, map[string]interface{}{
 		"mode": m365ModeDirect, "app_id": req.AppID, "m365_tenant_id": req.M365TenantID, "replaced": existing != nil,
 	})
 	s.writeSuccessResponse(w, m365View(td.ID, cfg))
@@ -390,6 +397,10 @@ func (s *Server) handleDeleteTenantM365Connection(w http.ResponseWriter, r *http
 	if !ok {
 		return
 	}
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	td := s.m365ClientTenant(w, r)
 	if td == nil {
 		return
@@ -410,7 +421,7 @@ func (s *Server) handleDeleteTenantM365Connection(w http.ResponseWriter, r *http
 		return
 	}
 	view := m365View(td.ID, cfg)
-	s.m365Audit(r, td.ID, m365ActionDelete, map[string]interface{}{
+	s.m365Audit(r, principal.ID, td.ID, m365ActionDelete, map[string]interface{}{
 		"mode": view.Mode, "app_id": view.AppID, "m365_tenant_id": view.M365TenantID,
 	})
 	s.writeSuccessResponse(w, map[string]interface{}{"tenant_id": td.ID, "deleted": true})
@@ -535,6 +546,10 @@ func (s *Server) handleM365GDAPLinks(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	msp := s.m365MSPTenant(w, r)
 	if msp == nil {
 		return
@@ -577,31 +592,8 @@ func (s *Server) handleM365GDAPLinks(w http.ResponseWriter, r *http.Request) {
 		seenCust[l.CustomerTenantID], seenTarget[l.TenantID] = true, true
 	}
 
-	// Every target must be an existing client tenant of this MSP that the caller may reach.
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	for i, l := range req.Links {
-		td, err := s.tenantManager.GetTenant(r.Context(), l.TenantID)
-		if err != nil {
-			if errors.Is(err, business.ErrTenantDoesNotExist) {
-				fail(http.StatusNotFound, i, "tenant not found", "TENANT_NOT_FOUND")
-				return
-			}
-			s.m365Internal(w, "failed to get tenant", msp.ID, err)
-			return
-		}
-		switch s.authorizeTenantAccess(r.Context(), principal, td.ID) {
-		case tenantAuthAllowed:
-		case tenantAuthNeedsCrossing:
-			s.writeTenantCrossingChallenge(w, td.ID)
-			return
-		default:
-			fail(http.StatusNotFound, i, "tenant not found", "TENANT_NOT_FOUND")
-			return
-		}
-		if mspID, isClient := s.m365ClientTenantMSP(r.Context(), td); !isClient || mspID != msp.ID {
-			fail(http.StatusBadRequest, i, "tenant is not a client tenant of the named MSP", "M365_NOT_CLIENT_TENANT")
-			return
-		}
+	if !s.m365LinkTargetsReachable(w, r, principal, msp, req.Links, fail) {
+		return
 	}
 
 	rels, err := s.m365DiscoverCustomers(r.Context(), req.m365PartnerCreds)
@@ -674,7 +666,7 @@ func (s *Server) handleM365GDAPLinks(w http.ResponseWriter, r *http.Request) {
 
 	linked := make([]m365GDAPLink, 0, len(plans))
 	for _, p := range plans {
-		s.m365Audit(r, p.link.TenantID, m365ActionGDAPLnk, map[string]interface{}{
+		s.m365Audit(r, principal.ID, p.link.TenantID, m365ActionGDAPLnk, map[string]interface{}{
 			"mode": m365ModePartner, "app_id": req.AppID, "partner_tenant_id": req.PartnerTenantID,
 			"m365_tenant_id": p.link.CustomerTenantID, "msp_tenant_id": msp.ID, "replaced": p.prev != nil,
 		})
@@ -682,6 +674,38 @@ func (s *Server) handleM365GDAPLinks(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(linked, func(i, j int) bool { return linked[i].TenantID < linked[j].TenantID })
 	s.writeSuccessResponse(w, map[string]interface{}{"msp_tenant_id": msp.ID, "linked": linked})
+}
+
+// m365LinkTargetsReachable checks that every link target is an existing client tenant of
+// msp that the caller may reach. fail writes a link-indexed error; on false the response
+// has been written.
+func (s *Server) m365LinkTargetsReachable(w http.ResponseWriter, r *http.Request, principal *Principal, msp *business.TenantData,
+	links []m365GDAPLink, fail func(status int, i int, msg, code string)) bool {
+	for i, l := range links {
+		td, err := s.tenantManager.GetTenant(r.Context(), l.TenantID)
+		if err != nil {
+			if errors.Is(err, business.ErrTenantDoesNotExist) {
+				fail(http.StatusNotFound, i, "tenant not found", "TENANT_NOT_FOUND")
+				return false
+			}
+			s.m365Internal(w, "failed to get tenant", msp.ID, err)
+			return false
+		}
+		switch s.authorizeTenantAccess(r.Context(), principal, td.ID) {
+		case tenantAuthAllowed:
+		case tenantAuthNeedsCrossing:
+			s.writeTenantCrossingChallenge(w, td.ID)
+			return false
+		default:
+			fail(http.StatusNotFound, i, "tenant not found", "TENANT_NOT_FOUND")
+			return false
+		}
+		if mspID, isClient := s.m365ClientTenantMSP(r.Context(), td); !isClient || mspID != msp.ID {
+			fail(http.StatusBadRequest, i, "tenant is not a client tenant of the named MSP", "M365_NOT_CLIENT_TENANT")
+			return false
+		}
+	}
+	return true
 }
 
 // m365Rollback restores the previous state of configs written earlier in a failed batch.

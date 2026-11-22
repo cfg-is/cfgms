@@ -289,6 +289,35 @@ func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.R
 	}
 }
 
+// scopedPendingEntry loads the pending entry a management verb names and checks it
+// against the caller's tenant scope. It answers 404 for a missing entry or one outside
+// the caller's subtree (no existence disclosure), and returns false once the response
+// is written.
+//
+// Issue #4336: this reads ctxkeys.TenantScope directly rather than callerTenantID/
+// isWithinTenantScope — an unset scope (a plumbing bug that lost the caller's tenant)
+// must be refused, not treated as unrestricted the way an empty callerTenant string was.
+func (s *Server) scopedPendingEntry(w http.ResponseWriter, r *http.Request, pendingID, route string) (*business.PendingRegistrationEntry, bool) {
+	entry, err := s.pendingStore.GetPendingByID(r.Context(), pendingID)
+	if err != nil {
+		if err == business.ErrPendingRegistrationNotFound {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+			return nil, false
+		}
+		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
+		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
+		return nil, false
+	}
+	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
+	if access := s.tenantAccessForScope(r.Context(), scope, entry.TenantID, route); access != tenantAuthAllowed {
+		if !s.writeTenantCrossingIfNeeded(w, access, entry.TenantID) {
+			http.Error(w, "pending registration not found", http.StatusNotFound)
+		}
+		return nil, false
+	}
+	return entry, true
+}
+
 // handleApproveRegistration handles POST /api/v1/registration/{id}/approve.
 // Marks the pending entry as approved; no cert is generated here (generate-on-claim).
 // Returns 404 when the entry's tenant is outside the caller's subtree (no existence disclosure).
@@ -298,25 +327,12 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	entry, err := s.pendingStore.GetPendingByID(r.Context(), pendingID)
-	if err != nil {
-		if err == business.ErrPendingRegistrationNotFound {
-			http.Error(w, "pending registration not found", http.StatusNotFound)
-			return
-		}
-		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
-	// Issue #4336: read ctxkeys.TenantScope directly rather than callerTenantID/
-	// isWithinTenantScope — an unset scope (a plumbing bug that lost the caller's
-	// tenant) must be refused, not treated as unrestricted the way an empty
-	// callerTenant string was.
-	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if access := s.tenantAccessForScope(r.Context(), scope, entry.TenantID, "POST /api/v1/registration/{id}/approve"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, entry.TenantID) {
-			http.Error(w, "pending registration not found", http.StatusNotFound)
-		}
+	entry, ok := s.scopedPendingEntry(w, r, pendingID, "POST /api/v1/registration/{id}/approve")
+	if !ok {
 		return
 	}
 	// A locked admission already holds a credential and a (tampered) record; an
@@ -340,7 +356,7 @@ func (s *Server) handleApproveRegistration(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.logger.Info("Steward registration approved (awaiting claim)", "pending_id", logging.SanitizeLogValue(pendingID))
-	s.emitRegistrationManagementAudit(r, "registration.approved",
+	s.emitRegistrationManagementAudit(r, principal.ID, "registration.approved",
 		map[string]interface{}{"pending_id": pendingID, "tenant_id": entry.TenantID})
 	w.WriteHeader(http.StatusOK)
 }
@@ -354,23 +370,12 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	entry, err := s.pendingStore.GetPendingByID(r.Context(), pendingID)
-	if err != nil {
-		if err == business.ErrPendingRegistrationNotFound {
-			http.Error(w, "pending registration not found", http.StatusNotFound)
-			return
-		}
-		s.logger.Error("Failed to look up pending registration", "pending_id", logging.SanitizeLogValue(pendingID), "error", logging.SanitizeLogValue(err.Error()))
-		http.Error(w, "Failed to look up pending registration", http.StatusInternalServerError)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
-	// Issue #4336: see handleApproveRegistration's identical comment on why this
-	// reads ctxkeys.TenantScope directly instead of callerTenantID/isWithinTenantScope.
-	scope, _ := r.Context().Value(ctxkeys.TenantScopeKey).(ctxkeys.TenantScope)
-	if access := s.tenantAccessForScope(r.Context(), scope, entry.TenantID, "POST /api/v1/registration/{id}/deny"); access != tenantAuthAllowed {
-		if !s.writeTenantCrossingIfNeeded(w, access, entry.TenantID) {
-			http.Error(w, "pending registration not found", http.StatusNotFound)
-		}
+	entry, ok := s.scopedPendingEntry(w, r, pendingID, "POST /api/v1/registration/{id}/deny")
+	if !ok {
 		return
 	}
 	// The deny reason is optional, so an absent body is not an error. A body that
@@ -400,7 +405,7 @@ func (s *Server) handleDenyRegistration(w http.ResponseWriter, r *http.Request) 
 	s.logger.Info("Steward registration denied",
 		"pending_id", logging.SanitizeLogValue(pendingID),
 		"reason", logging.SanitizeLogValue(req.Reason))
-	s.emitRegistrationManagementAudit(r, "registration.denied",
+	s.emitRegistrationManagementAudit(r, principal.ID, "registration.denied",
 		map[string]interface{}{"pending_id": pendingID, "tenant_id": entry.TenantID, "reason": req.Reason})
 	w.WriteHeader(http.StatusOK)
 }
@@ -802,6 +807,10 @@ func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Re
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	callerTenant := s.callerTenantID(r)
 	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
 	if err != nil {
@@ -814,21 +823,10 @@ func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Re
 	// ADR-025 boundary, a tenant below root it holds no crossing for — are skipped
 	// (Issue #4665).
 	mayApprove := s.tenantAccessFilter(r, "POST /api/v1/registration/approve-all")
-	approved := 0
-	for _, e := range entries {
-		if !s.bulkApprovable(r.Context(), e, mayApprove) {
-			continue
-		}
-		if err := s.pendingStore.UpdateStatus(r.Context(), e.PendingID, business.PendingRegistrationStatusApproved); err != nil {
-			s.logger.Error("Failed to approve pending registration in bulk",
-				"pending_id", logging.SanitizeLogValue(e.PendingID), "error", err)
-			continue
-		}
-		approved++
-	}
+	approved := s.approveBulk(r.Context(), entries, mayApprove, nil)
 
 	s.logger.Info("Bulk approve-all completed", "approved", approved)
-	s.emitRegistrationManagementAudit(r, "registration.approve_all",
+	s.emitRegistrationManagementAudit(r, principal.ID, "registration.approve_all",
 		map[string]interface{}{"approved_count": approved})
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(approveAllResponse{Approved: approved}); err != nil {
@@ -843,6 +841,10 @@ func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Re
 func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 
@@ -872,27 +874,35 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 
 	// Bulk: entries the caller may not act on are skipped (Issue #4665).
 	mayApprove := s.tenantAccessFilter(r, "POST /api/v1/registration/approve-by-cidr")
-	approved := 0
-	for _, e := range entries {
-		if !s.bulkApprovable(r.Context(), e, mayApprove) || !entryInCIDR(e, ipNet) {
-			continue
-		}
-		if err := s.pendingStore.UpdateStatus(r.Context(), e.PendingID, business.PendingRegistrationStatusApproved); err != nil {
-			s.logger.Error("Failed to approve pending registration in CIDR bulk",
-				"pending_id", logging.SanitizeLogValue(e.PendingID), "error", logging.SanitizeLogValue(err.Error()))
-			continue
-		}
-		approved++
-	}
+	approved := s.approveBulk(r.Context(), entries, mayApprove, ipNet)
 
 	s.logger.Info("CIDR bulk approve completed",
 		"cidr", logging.SanitizeLogValue(req.CIDR), "approved", approved)
-	s.emitRegistrationManagementAudit(r, "registration.approve_by_cidr",
+	s.emitRegistrationManagementAudit(r, principal.ID, "registration.approve_by_cidr",
 		map[string]interface{}{"cidr": req.CIDR, "approved_count": approved})
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(approveAllResponse{Approved: approved}); err != nil {
 		s.logger.Error("Failed to encode approve-by-cidr response", "error", logging.SanitizeLogValue(err.Error()))
 	}
+}
+
+// approveBulk approves each entry a bulk verb may approve (see bulkApprovable) and, when
+// ipNet is set, whose source IP lies inside it. An entry that fails to update is logged
+// and skipped. It returns the number approved.
+func (s *Server) approveBulk(ctx context.Context, entries []*business.PendingRegistrationEntry, mayApprove func(string) bool, ipNet *net.IPNet) int {
+	approved := 0
+	for _, e := range entries {
+		if !s.bulkApprovable(ctx, e, mayApprove) || (ipNet != nil && !entryInCIDR(e, ipNet)) {
+			continue
+		}
+		if err := s.pendingStore.UpdateStatus(ctx, e.PendingID, business.PendingRegistrationStatusApproved); err != nil {
+			s.logger.Error("Failed to approve pending registration in bulk",
+				"pending_id", logging.SanitizeLogValue(e.PendingID), "error", logging.SanitizeLogValue(err.Error()))
+			continue
+		}
+		approved++
+	}
+	return approved
 }
 
 // bulkApprovable reports whether a bulk approval may approve e: it is pending,
@@ -1739,7 +1749,7 @@ func (e serverIPExtractor) Extract(r *http.Request) string {
 
 // emitRegistrationManagementAudit records an audit event for a registration management action
 // (approve, deny, approve-all, approve-by-cidr). It is a no-op when auditManager is nil.
-func (s *Server) emitRegistrationManagementAudit(r *http.Request, action string, extras map[string]interface{}) {
+func (s *Server) emitRegistrationManagementAudit(r *http.Request, actorID, action string, extras map[string]interface{}) {
 	if s.auditManager == nil {
 		return
 	}
@@ -1747,11 +1757,6 @@ func (s *Server) emitRegistrationManagementAudit(r *http.Request, action string,
 	tenantID := callerTenant
 	if tenantID == "" {
 		tenantID = audit.SystemTenantID
-	}
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	principalID := ""
-	if principal != nil {
-		principalID = principal.ID
 	}
 	// audit.Manager rejects an event with no resource: name the pending entry when
 	// the action targets one, otherwise the action itself (bulk approvals).
@@ -1763,7 +1768,7 @@ func (s *Server) emitRegistrationManagementAudit(r *http.Request, action string,
 		Tenant(tenantID).
 		Type(business.AuditEventSystemAccess).
 		Action(action).
-		User(principalID, business.AuditUserTypeHuman).
+		User(actorID, business.AuditUserTypeHuman).
 		Resource("registration", resourceID, "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh)

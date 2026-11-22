@@ -12,6 +12,7 @@ import (
 	"time"
 
 	transportpb "github.com/cfgis/cfgms/api/proto/transport"
+	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/fleet/selector"
 	"github.com/cfgis/cfgms/features/controller/health"
 	osquerymodule "github.com/cfgis/cfgms/features/modules/extended/osquery"
@@ -60,6 +61,11 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	var req osqueryQueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
@@ -87,43 +93,9 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Selector == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "selector is required", "MISSING_SELECTOR")
+	filter, ok := s.osqueryTargetFilter(w, r, req.Selector)
+	if !ok {
 		return
-	}
-
-	filter, parsedTenantPath, err := selector.Parse(req.Selector)
-	if err != nil {
-		s.logger.Debug("Invalid osquery selector",
-			"selector", logging.SanitizeLogValue(req.Selector),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid selector", "INVALID_SELECTOR")
-		return
-	}
-
-	// Enforce the tenant authz boundary. selector.Parse deliberately does not do
-	// this — it returns the parsed tenant path and leaves the decision to the
-	// caller. fleet.Filter{TenantSubtree: ""} is unrestricted, so an unset
-	// TenantSubtree would fan a catalog query out across every tenant's stewards.
-	// An explicit selector prefix must lie at or below the caller's own node;
-	// an absent prefix defaults to the caller's entire subtree. Admin callers
-	// (empty tenant ID, e.g. mTLS cert admins) remain unrestricted, matching
-	// handleResolveSelector and handleDispatchUpgrade.
-	callerTenantID := callerTenantFilter(r.Context())
-	if parsedTenantPath != "" {
-		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), parsedTenantPath, "POST /api/v1/osquery/query"); access != tenantAuthAllowed {
-			if !s.writeTenantCrossingIfNeeded(w, access, parsedTenantPath) {
-				s.logger.Info("Osquery selector tenant outside caller subtree",
-					"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
-					"caller_tenant", logging.SanitizeLogValue(callerTenantID))
-				s.writeErrorResponse(w, http.StatusForbidden,
-					"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
-			}
-			return
-		}
-		filter.TenantSubtree = parsedTenantPath
-	} else if callerTenantID != "" { //architecture:allow-root-scope -- selector narrowing for tenant callers; the matched stewards then pass authorizeFleetTargets
-		s.scopeFilterToTenantSubtree(r.Context(), &filter, callerTenantID)
 	}
 
 	if s.fleetQuery == nil {
@@ -155,9 +127,53 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 	results := s.fanOutOsqueryQuery(r.Context(), stewardIDs, req)
 	s.recordOsqueryQuerySignals(time.Since(dispatchStart), results)
 
-	s.emitOsqueryAudit(r, req.CatalogID, stewardIDs)
+	s.emitOsqueryAudit(r, principal.ID, req.CatalogID, stewardIDs)
 
 	s.writeSuccessResponse(w, osqueryQueryResponse{Results: results})
+}
+
+// osqueryTargetFilter parses the fleet selector of an osquery dispatch and enforces the
+// caller's tenant authorization boundary on it. On false the response has been written.
+func (s *Server) osqueryTargetFilter(w http.ResponseWriter, r *http.Request, selectorExpr string) (fleet.Filter, bool) {
+	if selectorExpr == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "selector is required", "MISSING_SELECTOR")
+		return fleet.Filter{}, false
+	}
+
+	filter, parsedTenantPath, err := selector.Parse(selectorExpr)
+	if err != nil {
+		s.logger.Debug("Invalid osquery selector",
+			"selector", logging.SanitizeLogValue(selectorExpr),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid selector", "INVALID_SELECTOR")
+		return fleet.Filter{}, false
+	}
+
+	// Enforce the tenant authz boundary. selector.Parse deliberately does not do
+	// this — it returns the parsed tenant path and leaves the decision to the
+	// caller. fleet.Filter{TenantSubtree: ""} is unrestricted, so an unset
+	// TenantSubtree would fan a catalog query out across every tenant's stewards.
+	// An explicit selector prefix must lie at or below the caller's own node;
+	// an absent prefix defaults to the caller's entire subtree. Admin callers
+	// (empty tenant ID, e.g. mTLS cert admins) remain unrestricted, matching
+	// handleResolveSelector and handleDispatchUpgrade.
+	callerTenantID := callerTenantFilter(r.Context())
+	if parsedTenantPath != "" {
+		if access := s.tenantAccessForScope(r.Context(), callerTenantScope(r), parsedTenantPath, "POST /api/v1/osquery/query"); access != tenantAuthAllowed {
+			if !s.writeTenantCrossingIfNeeded(w, access, parsedTenantPath) {
+				s.logger.Info("Osquery selector tenant outside caller subtree",
+					"parsed_tenant", logging.SanitizeLogValue(parsedTenantPath),
+					"caller_tenant", logging.SanitizeLogValue(callerTenantID))
+				s.writeErrorResponse(w, http.StatusForbidden,
+					"Target tenant is outside the caller's authorized subtree", "CROSS_TENANT")
+			}
+			return fleet.Filter{}, false
+		}
+		filter.TenantSubtree = parsedTenantPath
+	} else if callerTenantID != "" { //architecture:allow-root-scope -- selector narrowing for tenant callers; the matched stewards then pass authorizeFleetTargets
+		s.scopeFilterToTenantSubtree(r.Context(), &filter, callerTenantID)
+	}
+	return filter, true
 }
 
 // fanOutOsqueryQuery queries every steward concurrently and returns one result per
@@ -322,22 +338,16 @@ func rowsToMaps(rows []*transportpb.OsqueryRow) []map[string]string {
 
 // emitOsqueryAudit records an osquery dispatch audit event.
 // stewardIDs is the list of targeted steward IDs. No-op when auditManager is nil.
-func (s *Server) emitOsqueryAudit(r *http.Request, catalogID string, stewardIDs []string) {
+func (s *Server) emitOsqueryAudit(r *http.Request, actorID, catalogID string, stewardIDs []string) {
 	if s.auditManager == nil {
 		return
-	}
-
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	callerID := ""
-	if principal != nil {
-		callerID = principal.ID
 	}
 
 	b := audit.NewEventBuilder().
 		Tenant("root").
 		Type(business.AuditEventSystemAccess).
 		Action("osquery.query.dispatch").
-		User(callerID, business.AuditUserTypeHuman).
+		User(actorID, business.AuditUserTypeHuman).
 		Resource("osquery_catalog", logging.SanitizeLogValue(catalogID), "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh).

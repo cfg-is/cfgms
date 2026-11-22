@@ -354,26 +354,24 @@ func revokeStewardSerials(mgr *cert.Manager, stewardID string) ([]string, error)
 	return serials, nil
 }
 
-func (s *Server) emitIdentityOperatorAudit(ctx context.Context, r *http.Request, action string, record *business.StewardRecord, extras map[string]interface{}) {
-	s.emitOperatorAuditResult(ctx, r, action, business.AuditResultSuccess, record, extras)
+// emitIdentityOperatorAudit records a successful operator identity verb under actorID,
+// the acting principal the handler resolved with requireActingPrincipal.
+func (s *Server) emitIdentityOperatorAudit(ctx context.Context, actorID, action string, record *business.StewardRecord, extras map[string]interface{}) {
+	s.emitOperatorAuditResult(ctx, actorID, action, business.AuditResultSuccess, record, extras)
 }
 
 // emitOperatorAuditResult writes a high-severity security audit event naming the
-// acting principal, with the given result (a refused verb is recorded as denied).
-func (s *Server) emitOperatorAuditResult(ctx context.Context, r *http.Request, action string, result business.AuditResult, record *business.StewardRecord, extras map[string]interface{}) {
+// acting principal (actorID, resolved by the handler), with the given result (a
+// refused verb is recorded as denied).
+func (s *Server) emitOperatorAuditResult(ctx context.Context, actorID, action string, result business.AuditResult, record *business.StewardRecord, extras map[string]interface{}) {
 	if s.auditManager == nil {
 		return
-	}
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	principalID := ""
-	if principal != nil {
-		principalID = principal.ID
 	}
 	b := audit.NewEventBuilder().
 		Tenant(record.TenantID).
 		Type(business.AuditEventSecurityEvent).
 		Action(action).
-		User(principalID, business.AuditUserTypeHuman).
+		User(actorID, business.AuditUserTypeHuman).
 		Resource("steward", record.ID, "").
 		Result(result).
 		Severity(business.AuditSeverityHigh).
@@ -400,6 +398,10 @@ type rotateCredentialsResponse struct {
 // steward and archive the record, so the next refresh is queued for approval
 // whatever the refresh policy says.
 func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	record, ok := s.operatorStewardRecord(w, r, "POST /api/v1/stewards/{id}/credentials/rotate")
 	if !ok {
 		return
@@ -425,7 +427,7 @@ func (s *Server) handleRotateCredentials(w http.ResponseWriter, r *http.Request)
 				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
-	s.emitIdentityOperatorAudit(r.Context(), r, auditActionCredentialsRotated, record, map[string]interface{}{
+	s.emitIdentityOperatorAudit(r.Context(), principal.ID, auditActionCredentialsRotated, record, map[string]interface{}{
 		"revoked_serials": serials,
 		"previous_status": string(record.Status),
 	})
@@ -468,6 +470,10 @@ type moveIdentityResponse struct {
 // then signs the certificate under that ID), and the previous serials are
 // revoked. Nothing else moves an identity.
 func (s *Server) handleMoveIdentity(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	// A tampered record is a valid source only when the queued entry is a locked
 	// copy being linked back to it; that is decided once the entry is loaded.
 	record, ok := s.operatorStewardLookup(w, r, "POST /api/v1/stewards/{id}/identity/move")
@@ -492,44 +498,15 @@ func (s *Server) handleMoveIdentity(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if s.tryLinkLockedCopy(w, r, record, entry, req.ConfirmLive) {
+	if s.tryLinkLockedCopy(w, r, principal.ID, record, entry, req.ConfirmLive) {
 		return
 	}
 	if !s.ordinaryMoveAllowed(w, record, entry) {
 		return
 	}
 
-	// (a) Rebind the record. A device_id conflict changes nothing.
-	oldDeviceID, oldKey, oldLevel, oldAlg := record.DeviceID, record.IdentityKeyPub, record.KeyProtectionLevel, record.KeyAlgorithm
-	if err := s.stewardStore.RebindStewardIdentity(ctx, record.ID, entry.DeviceID, entry.IdentityKeyPub, entry.KeyProtectionLevel, entry.KeyAlgorithm); err != nil {
-		if errors.Is(err, business.ErrStewardDeviceIDConflict) {
-			s.writeErrorResponse(w, http.StatusConflict, "Device identity is held by another steward in this tenant", "DEVICE_ID_CONFLICT")
-			return
-		}
-		s.logger.Error("move identity: rebind failed",
-			"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to move identity", "INTERNAL_ERROR")
-		return
-	}
-
-	// (b) Point the queued entry at the original ID and approve it.
-	stepErr := s.pendingStore.ReassignPendingSteward(ctx, entry.PendingID, record.ID)
-	if stepErr == nil {
-		stepErr = s.pendingStore.UpdateStatus(ctx, entry.PendingID, business.PendingRegistrationStatusApproved)
-	}
-	if stepErr != nil {
-		// Put the record back so the original machine keeps its identity.
-		if rbErr := s.stewardStore.RebindStewardIdentity(ctx, record.ID, oldDeviceID, oldKey, oldLevel, oldAlg); rbErr != nil {
-			s.logger.Error("move identity: rollback of rebind failed",
-				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(rbErr.Error()))
-		}
-		if errors.Is(stepErr, business.ErrPendingRegistrationNotFound) {
-			s.writeErrorResponse(w, http.StatusConflict, "Queued copy was modified concurrently; reload and retry", "PENDING_CONFLICT")
-			return
-		}
-		s.logger.Error("move identity: approving queued copy failed",
-			"pending_id", logging.SanitizeLogValue(entry.PendingID), "error", logging.SanitizeLogValue(stepErr.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to move identity", "INTERNAL_ERROR")
+	oldDeviceID, ok := s.rebindAndApproveMove(ctx, w, record, entry)
+	if !ok {
 		return
 	}
 
@@ -543,7 +520,7 @@ func (s *Server) handleMoveIdentity(w http.ResponseWriter, r *http.Request) {
 			"Identity moved but old certificates could not all be revoked; run rotate-credentials to finish", "INTERNAL_ERROR")
 		return
 	}
-	s.emitIdentityOperatorAudit(ctx, r, auditActionIdentityMoved, record, map[string]interface{}{
+	s.emitIdentityOperatorAudit(ctx, principal.ID, auditActionIdentityMoved, record, map[string]interface{}{
 		"pending_id":      entry.PendingID,
 		"old_device_id":   oldDeviceID,
 		"new_device_id":   entry.DeviceID,
@@ -559,6 +536,45 @@ func (s *Server) handleMoveIdentity(w http.ResponseWriter, r *http.Request) {
 		RevokedSerials: serials,
 		NextStep:       "The queued machine claims its approved registration under the original steward ID on its next poll; the previous machine's certificates are revoked.",
 	})
+}
+
+// rebindAndApproveMove runs the first two steps of an ordinary identity move: (a) rebind
+// the record to the queued copy's device identity (a device_id conflict changes
+// nothing), then (b) point the queued entry at the original ID and approve it, putting
+// the record back when that fails so the original machine keeps its identity. It returns
+// the record's previous device ID; on false the response has been written.
+func (s *Server) rebindAndApproveMove(ctx context.Context, w http.ResponseWriter, record *business.StewardRecord, entry *business.PendingRegistrationEntry) (oldDeviceID string, ok bool) {
+	oldDeviceID, oldKey, oldLevel, oldAlg := record.DeviceID, record.IdentityKeyPub, record.KeyProtectionLevel, record.KeyAlgorithm
+	if err := s.stewardStore.RebindStewardIdentity(ctx, record.ID, entry.DeviceID, entry.IdentityKeyPub, entry.KeyProtectionLevel, entry.KeyAlgorithm); err != nil {
+		if errors.Is(err, business.ErrStewardDeviceIDConflict) {
+			s.writeErrorResponse(w, http.StatusConflict, "Device identity is held by another steward in this tenant", "DEVICE_ID_CONFLICT")
+			return "", false
+		}
+		s.logger.Error("move identity: rebind failed",
+			"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to move identity", "INTERNAL_ERROR")
+		return "", false
+	}
+
+	stepErr := s.pendingStore.ReassignPendingSteward(ctx, entry.PendingID, record.ID)
+	if stepErr == nil {
+		stepErr = s.pendingStore.UpdateStatus(ctx, entry.PendingID, business.PendingRegistrationStatusApproved)
+	}
+	if stepErr == nil {
+		return oldDeviceID, true
+	}
+	if rbErr := s.stewardStore.RebindStewardIdentity(ctx, record.ID, oldDeviceID, oldKey, oldLevel, oldAlg); rbErr != nil {
+		s.logger.Error("move identity: rollback of rebind failed",
+			"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(rbErr.Error()))
+	}
+	if errors.Is(stepErr, business.ErrPendingRegistrationNotFound) {
+		s.writeErrorResponse(w, http.StatusConflict, "Queued copy was modified concurrently; reload and retry", "PENDING_CONFLICT")
+		return "", false
+	}
+	s.logger.Error("move identity: approving queued copy failed",
+		"pending_id", logging.SanitizeLogValue(entry.PendingID), "error", logging.SanitizeLogValue(stepErr.Error()))
+	s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to move identity", "INTERNAL_ERROR")
+	return "", false
 }
 
 // loadMoveEntry loads the queued entry an identity move names. An entry in
@@ -583,7 +599,7 @@ func (s *Server) loadMoveEntry(w http.ResponseWriter, r *http.Request, record *b
 // tryLinkLockedCopy links entry back to record when entry is a locked copy of
 // it, and reports whether it handled the request (including a lookup failure,
 // answered 500). On false the request is an ordinary move.
-func (s *Server) tryLinkLockedCopy(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, entry *business.PendingRegistrationEntry, confirmLive bool) bool {
+func (s *Server) tryLinkLockedCopy(w http.ResponseWriter, r *http.Request, actorID string, record *business.StewardRecord, entry *business.PendingRegistrationEntry, confirmLive bool) bool {
 	lk, locked, err := s.lockedLinkTarget(r.Context(), record, entry)
 	if err != nil {
 		s.logger.Error("move identity: copy lookup failed",
@@ -594,7 +610,7 @@ func (s *Server) tryLinkLockedCopy(w http.ResponseWriter, r *http.Request, recor
 	if !locked {
 		return false
 	}
-	s.linkLockedCopy(w, r, record, entry, lk, confirmLive)
+	s.linkLockedCopy(w, r, actorID, record, entry, lk, confirmLive)
 	return true
 }
 
@@ -705,16 +721,16 @@ func lockedLinkForCopy(record, copyRec *business.StewardRecord) (lockedLink, boo
 // The steps are ordered so no window leaves two live credentials for one
 // identity, and a failure up to the approval leaves the old record as it was.
 // Every step is idempotent, so a retry completes a link that stopped part-way.
-func (s *Server) linkLockedCopy(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, entry *business.PendingRegistrationEntry, lk lockedLink, confirmLive bool) {
+func (s *Server) linkLockedCopy(w http.ResponseWriter, r *http.Request, actorID string, record *business.StewardRecord, entry *business.PendingRegistrationEntry, lk lockedLink, confirmLive bool) {
 	// An earlier attempt that approved the entry but failed to supersede it only
 	// has the supersede step left.
 	supersedeOnly := entry.Status == business.PendingRegistrationStatusApproved &&
 		entry.StewardID == record.ID && record.DeviceID == entry.DeviceID
-	live, ok := s.linkPreconditions(w, r, record, entry, lk, supersedeOnly, confirmLive)
+	live, ok := s.linkPreconditions(w, r, actorID, record, entry, lk, supersedeOnly, confirmLive)
 	if !ok {
 		return
 	}
-	l := &linkRun{s: s, w: w, r: r, ctx: r.Context(), record: record, entry: entry, lk: lk, confirmed: live && confirmLive}
+	l := &linkRun{s: s, w: w, actorID: actorID, ctx: r.Context(), record: record, entry: entry, lk: lk, confirmed: live && confirmLive}
 
 	var serials []string
 	if !supersedeOnly {
@@ -732,7 +748,7 @@ func (s *Server) linkLockedCopy(w http.ResponseWriter, r *http.Request, record *
 // linkPreconditions checks that entry can be linked and, when the old record
 // heartbeated within linkLiveWindow, that the operator confirmed it. It returns
 // whether the old record is live. On false the response has been written.
-func (s *Server) linkPreconditions(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, entry *business.PendingRegistrationEntry,
+func (s *Server) linkPreconditions(w http.ResponseWriter, r *http.Request, actorID string, record *business.StewardRecord, entry *business.PendingRegistrationEntry,
 	lk lockedLink, supersedeOnly, confirmLive bool) (live bool, ok bool) {
 	if entry.Status != business.PendingRegistrationStatusPending && !supersedeOnly {
 		s.writeErrorResponse(w, http.StatusConflict, "Queued copy is no longer pending", "PENDING_NOT_PENDING")
@@ -743,7 +759,7 @@ func (s *Server) linkPreconditions(w http.ResponseWriter, r *http.Request, recor
 	}
 	live = !supersedeOnly && !record.LastHeartbeatAt.IsZero() && time.Since(record.LastHeartbeatAt) <= linkLiveWindow
 	if live && !confirmLive {
-		s.emitOperatorAuditResult(r.Context(), r, auditActionLinkRefused, business.AuditResultDenied, record, map[string]interface{}{
+		s.emitOperatorAuditResult(r.Context(), actorID, auditActionLinkRefused, business.AuditResultDenied, record, map[string]interface{}{
 			"pending_id": entry.PendingID, "copy_steward_id": lk.copyID, "reason": "confirm_live_required",
 		})
 		s.writeErrorResponse(w, http.StatusConflict,
@@ -760,7 +776,7 @@ func (s *Server) linkPreconditions(w http.ResponseWriter, r *http.Request, recor
 type linkRun struct {
 	s         *Server
 	w         http.ResponseWriter
-	r         *http.Request
+	actorID   string // the acting principal's ID, resolved by the handler
 	ctx       context.Context
 	record    *business.StewardRecord
 	entry     *business.PendingRegistrationEntry
@@ -779,7 +795,7 @@ func (l *linkRun) step(name string, extras map[string]interface{}) {
 	for k, v := range extras {
 		d[k] = v
 	}
-	l.s.emitIdentityOperatorAudit(l.ctx, l.r, auditActionLinkStep, l.record, d)
+	l.s.emitIdentityOperatorAudit(l.ctx, l.actorID, auditActionLinkStep, l.record, d)
 }
 
 // fail runs rollback (when set), audits the failed step and answers status.
@@ -789,7 +805,7 @@ func (l *linkRun) fail(status int, code, name string, err error, rollback func()
 	}
 	l.s.logger.Error("link locked copy: step failed",
 		"steward_id", logging.SanitizeLogValue(l.record.ID), "step", name, "error", logging.SanitizeLogValue(err.Error()))
-	l.s.emitOperatorAuditResult(l.ctx, l.r, auditActionLinkFailed, business.AuditResultFailure, l.record, map[string]interface{}{
+	l.s.emitOperatorAuditResult(l.ctx, l.actorID, auditActionLinkFailed, business.AuditResultFailure, l.record, map[string]interface{}{
 		"pending_id": l.entry.PendingID, "copy_steward_id": l.lk.copyID, "step": name,
 	})
 	l.s.writeErrorResponse(l.w, status, "Link failed at step "+name+"; retry to complete the link", code)
@@ -936,7 +952,7 @@ func (l *linkRun) supersedePending() bool {
 // finish audits the completed link and answers with its outcome.
 func (l *linkRun) finish(serials []string) {
 	record, entry := l.record, l.entry
-	l.s.emitIdentityOperatorAudit(l.ctx, l.r, auditActionIdentityMoved, record, map[string]interface{}{
+	l.s.emitIdentityOperatorAudit(l.ctx, l.actorID, auditActionIdentityMoved, record, map[string]interface{}{
 		"pending_id":      entry.PendingID,
 		"copy_steward_id": l.lk.copyID,
 		"new_device_id":   entry.DeviceID,

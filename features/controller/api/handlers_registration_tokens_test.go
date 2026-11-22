@@ -138,6 +138,7 @@ func makeScopedTokenRequest(t *testing.T, method, path, tenantID, tokenVar strin
 	req := httptest.NewRequest(method, path, nil)
 	ctx := context.WithValue(req.Context(), ctxkeys.TenantID, tenantID)
 	ctx = context.WithValue(ctx, ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope(tenantID))
+	ctx = context.WithValue(ctx, principalContextKey, &Principal{ID: "scoped-operator"})
 	req = req.WithContext(ctx)
 	return mux.SetURLVars(req, map[string]string{"token": tokenVar})
 }
@@ -291,6 +292,7 @@ func TestCreateRegistrationToken(t *testing.T) {
 		req := httptest.NewRequest("POST", "/api/v1/registration/tokens", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+		req = req.WithContext(withActor(req.Context(), &Principal{ID: "operator-a"}))
 		rec := httptest.NewRecorder()
 
 		server.handleCreateRegistrationToken(rec, req)
@@ -822,6 +824,7 @@ func TestRotateRegistrationToken_CrossTenantRefused(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/registration/tokens/tenant-b/rotate", nil)
 	req = mux.SetURLVars(req, map[string]string{"tenant_id": "tenant-b"})
 	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+	req = req.WithContext(withActor(req.Context(), &Principal{ID: "operator-a"}))
 	rec := httptest.NewRecorder()
 	server.handleRotateRegistrationToken(rec, req)
 

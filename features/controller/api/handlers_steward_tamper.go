@@ -138,6 +138,10 @@ func liveTamperCodes(record *business.StewardRecord, now time.Time) []string {
 // and normal traffic resumes. A steward that still reports a tamper code is
 // refused: nothing overrides that check.
 func (s *Server) handleRestoreTamperedSteward(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	record, ok := s.tamperedStewardRecord(w, r, "POST /api/v1/stewards/{id}/tamper/restore")
 	if !ok {
 		return
@@ -151,7 +155,7 @@ func (s *Server) handleRestoreTamperedSteward(w http.ResponseWriter, r *http.Req
 	if s.refuseRestoreOfLinkableCopy(ctx, w, record) {
 		return
 	}
-	if s.refuseRestoreWhileFaulted(w, r, record, reason) {
+	if s.refuseRestoreWhileFaulted(w, r, principal.ID, record, reason) {
 		return
 	}
 
@@ -159,15 +163,7 @@ func (s *Server) handleRestoreTamperedSteward(w http.ResponseWriter, r *http.Req
 	if record.LastHeartbeatAt.IsZero() {
 		target = business.StewardStatusRegistered
 	}
-	transitioned, err := s.stewardStore.TransitionStewardStatus(ctx, record.ID, target, business.StewardStatusTampered)
-	if err != nil {
-		s.logger.Error("tamper restore: status transition failed",
-			"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to restore steward", "INTERNAL_ERROR")
-		return
-	}
-	if !transitioned {
-		s.writeErrorResponse(w, http.StatusConflict, "Steward is no longer tampered", "STEWARD_NOT_TAMPERED")
+	if !s.restoreTransition(ctx, w, record.ID, target) {
 		return
 	}
 	if s.controllerService != nil {
@@ -176,7 +172,7 @@ func (s *Server) handleRestoreTamperedSteward(w http.ResponseWriter, r *http.Req
 				"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 		}
 	}
-	s.emitIdentityOperatorAudit(ctx, r, auditActionTamperRestored, record, map[string]interface{}{
+	s.emitIdentityOperatorAudit(ctx, principal.ID, auditActionTamperRestored, record, map[string]interface{}{
 		"previous_status": string(record.Status),
 		"new_status":      string(target),
 		"reason":          reason,
@@ -189,6 +185,24 @@ func (s *Server) handleRestoreTamperedSteward(w http.ResponseWriter, r *http.Req
 		Status: string(target),
 		Note:   "Restored: the steward is trusted again and normal traffic resumes. If it still reports a tamper code on its next heartbeat it returns to tampered.",
 	})
+}
+
+// restoreTransition moves a tampered steward to target. The transition is the atomic
+// step that lets exactly one of two parallel restore/ban calls win. On false the
+// response has been written.
+func (s *Server) restoreTransition(ctx context.Context, w http.ResponseWriter, stewardID string, target business.StewardStatus) bool {
+	transitioned, err := s.stewardStore.TransitionStewardStatus(ctx, stewardID, target, business.StewardStatusTampered)
+	if err != nil {
+		s.logger.Error("tamper restore: status transition failed",
+			"steward_id", logging.SanitizeLogValue(stewardID), "error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to restore steward", "INTERNAL_ERROR")
+		return false
+	}
+	if !transitioned {
+		s.writeErrorResponse(w, http.StatusConflict, "Steward is no longer tampered", "STEWARD_NOT_TAMPERED")
+		return false
+	}
+	return true
 }
 
 // refuseRestoreOfLinkableCopy answers 409 LINK_REQUIRED when record is a locked
@@ -213,12 +227,12 @@ func (s *Server) refuseRestoreOfLinkableCopy(ctx context.Context, w http.Respons
 // refuseRestoreWhileFaulted answers 409 fault_still_reported, and audits the
 // refusal with the codes, when the steward's latest heartbeat inside the window
 // still carries a tamper code. It reports whether it refused.
-func (s *Server) refuseRestoreWhileFaulted(w http.ResponseWriter, r *http.Request, record *business.StewardRecord, reason string) bool {
+func (s *Server) refuseRestoreWhileFaulted(w http.ResponseWriter, r *http.Request, actorID string, record *business.StewardRecord, reason string) bool {
 	codes := liveTamperCodes(record, time.Now())
 	if len(codes) == 0 {
 		return false
 	}
-	s.emitOperatorAuditResult(r.Context(), r, auditActionTamperRestoreRefused, business.AuditResultDenied, record, map[string]interface{}{
+	s.emitOperatorAuditResult(r.Context(), actorID, auditActionTamperRestoreRefused, business.AuditResultDenied, record, map[string]interface{}{
 		"codes":  codes,
 		"reason": reason,
 	})
@@ -255,6 +269,10 @@ func (s *Server) notifyTamperState(ctx context.Context, stewardID string) {
 // becomes revoked, and the live control stream is closed. It affects only the
 // identity named.
 func (s *Server) handleBanTamperedSteward(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	record, ok := s.tamperedStewardRecord(w, r, "POST /api/v1/stewards/{id}/tamper/ban")
 	if !ok {
 		return
@@ -298,7 +316,7 @@ func (s *Server) handleBanTamperedSteward(w http.ResponseWriter, r *http.Request
 		}
 	}
 	s.evictStewardStream(record.ID)
-	s.emitIdentityOperatorAudit(ctx, r, auditActionTamperBanned, record, map[string]interface{}{
+	s.emitIdentityOperatorAudit(ctx, principal.ID, auditActionTamperBanned, record, map[string]interface{}{
 		"previous_status": string(record.Status),
 		"revoked_serials": serials,
 		"reason":          reason,

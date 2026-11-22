@@ -819,6 +819,7 @@ func TestHandleApproveRegistration_CrossTenantRefused(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/registration/pending-tenant-b-1/approve", nil)
 	req = mux.SetURLVars(req, map[string]string{"id": "pending-tenant-b-1"})
 	req = req.WithContext(context.WithValue(req.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewTenantScope("tenant-a")))
+	req = req.WithContext(withActor(req.Context(), &Principal{ID: "operator-a"}))
 	rec := httptest.NewRecorder()
 	server.handleApproveRegistration(rec, req)
 
@@ -2057,7 +2058,9 @@ func TestHandleApproveByCIDR_UnsetScope_Refused(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-by-cidr",
 			strings.NewReader(`{"cidr":"192.168.1.0/24"}`))
 		req.Header.Set("Content-Type", "application/json")
-		// Deliberately no ctxkeys.TenantScopeKey on the context.
+		// Deliberately no ctxkeys.TenantScopeKey on the context; the actor is present so
+		// the refusal comes from the scope check, not from the missing-actor 401.
+		req = req.WithContext(withActor(req.Context(), &Principal{ID: "operator-1"}))
 		rec := httptest.NewRecorder()
 		server.handleApproveByCIDR(rec, req)
 
@@ -2963,6 +2966,7 @@ func TestRegistrationHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 				// it carries a root scope (matching a verified mTLS admin) rather than an
 				// unset one.
 				r = r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
+				r = r.WithContext(withActor(r.Context(), &Principal{ID: "operator-1"}))
 				rec := httptest.NewRecorder()
 				s.handleApproveRegistration(rec, r)
 				return rec
@@ -2973,6 +2977,7 @@ func TestRegistrationHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 			invoke: func(s *Server, _ string) *httptest.ResponseRecorder {
 				r := httptest.NewRequest(http.MethodPost, "/api/v1/registration/approve-all", nil)
 				r = r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
+				r = r.WithContext(withActor(r.Context(), &Principal{ID: "operator-1"}))
 				rec := httptest.NewRecorder()
 				s.handleApproveAllRegistrations(rec, r)
 				return rec
@@ -2987,6 +2992,7 @@ func TestRegistrationHandlers_SucceedOnNonAuthoritativeNode(t *testing.T) {
 				// Issue #4336: handleApproveByCIDR now resolves its tenant list filter
 				// from ctxkeys.TenantScope; see the comment on the approve subtest above.
 				r = r.WithContext(context.WithValue(r.Context(), ctxkeys.TenantScopeKey, ctxkeys.NewRootScope()))
+				r = r.WithContext(withActor(r.Context(), &Principal{ID: "operator-1"}))
 				rec := httptest.NewRecorder()
 				s.handleApproveByCIDR(rec, r)
 				return rec
@@ -4026,7 +4032,7 @@ func TestEmitRegistrationManagementAudit_CancelledContext_PersistsAllEvents(t *t
 	cancel()
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/x", nil).WithContext(ctx)
 	for i := 0; i < cancelledAuditEventCount; i++ {
-		server.emitRegistrationManagementAudit(r, fmt.Sprintf("registration.manage.test.%d", i), nil)
+		server.emitRegistrationManagementAudit(r, "op-cancel", fmt.Sprintf("registration.manage.test.%d", i), nil)
 	}
 	requireAuditPersisted(t, server, "tenant-cancel-mgmt", cancelledAuditEventCount)
 }
