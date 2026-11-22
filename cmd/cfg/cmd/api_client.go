@@ -2168,11 +2168,32 @@ type OsqueryStewardResult struct {
 	StewardID string              `json:"steward_id"`
 	Rows      []map[string]string `json:"rows"`
 	Error     string              `json:"error,omitempty"`
+	// Outcome is answered, not_connected or failed; empty from an older controller.
+	Outcome string `json:"outcome,omitempty"`
+	// LastSeen is the steward's last check-in; set only on not_connected, and
+	// absent when the steward has never checked in.
+	LastSeen *time.Time `json:"last_seen,omitempty"`
+}
+
+// OsquerySummary is the per-query outcome count the controller reports.
+type OsquerySummary struct {
+	Matched      int        `json:"matched"`
+	Answered     int        `json:"answered"`
+	NotConnected int        `json:"not_connected"`
+	Failed       int        `json:"failed"`
+	QueriedAt    *time.Time `json:"queried_at,omitempty"`
+}
+
+// OsqueryQueryResult is the decoded response of POST /api/v1/osquery/query.
+// Summary is nil when the controller sent none (an older controller).
+type OsqueryQueryResult struct {
+	Summary *OsquerySummary        `json:"summary,omitempty"`
+	Results []OsqueryStewardResult `json:"results"`
 }
 
 // QueryOsquery calls POST /api/v1/osquery/query. The route is Strong + presence
 // gated; the step-up relay on the client answers the challenge.
-func (c *APIClient) QueryOsquery(ctx context.Context, catalogID string, params map[string]string, selector string) ([]OsqueryStewardResult, error) {
+func (c *APIClient) QueryOsquery(ctx context.Context, catalogID string, params map[string]string, selector string) (*OsqueryQueryResult, error) {
 	if params == nil {
 		params = map[string]string{}
 	}
@@ -2195,16 +2216,14 @@ func (c *APIClient) QueryOsquery(ctx context.Context, catalogID string, params m
 	}
 
 	var envelope struct {
-		Data struct {
-			Results []OsqueryStewardResult `json:"results"`
-		} `json:"data"`
-		Results []OsqueryStewardResult `json:"results"`
+		Data OsqueryQueryResult `json:"data"`
+		OsqueryQueryResult
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
-	if envelope.Data.Results != nil {
-		return envelope.Data.Results, nil
+	if envelope.Data.Results != nil || envelope.Data.Summary != nil {
+		return &envelope.Data, nil
 	}
-	return envelope.Results, nil
+	return &envelope.OsqueryQueryResult, nil
 }

@@ -13,17 +13,30 @@
  * this view never builds that header. A cancelled tap comes back as the
  * 'cancelled' failure: nothing was sent to any steward.
  *
- * Results render one card per steward, identified by steward_id only (the API
- * returns no hostname). Error results and ran-but-empty results are visually
- * distinct cards; the tally pills and filters are derived client-side.
+ * Results are identified by steward_id only (the API returns no hostname). Each
+ * answered steward gets its own card: rows, or a ran-but-empty card. Stewards
+ * that were not connected to the controller node that ran the query (nothing was
+ * sent to them) are
+ * listed together in one Not reached group, each with its last check-in time
+ * relative to when the query ran, or "no check-in recorded"; their error text is
+ * not shown. Failed stewards keep their own Error card with the error text.
+ * Under All the order is answered cards (server order), the group, then failed
+ * cards.
  *
- * Security A9.1: every cell value, steward id and error string renders as JSX
- * text, never as HTML.
+ * The tally's matched / answered / not reached / failed numbers are the API's
+ * summary as sent (derived from the results only when an older controller sends
+ * none); the with-rows / no-rows breakdown and the filters are derived
+ * client-side. The "ran" time is the server's queried_at when present, else the
+ * client time the response arrived.
+ *
+ * Security A9.1: every cell value, steward id, error string and time renders as
+ * JSX text, never as HTML.
  */
 import { useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router'
 import SelectorInput from '../shell/SelectorInput.tsx'
 import type { AppShellContext } from '../shell/AppShell.tsx'
+import { formatLastSeen, parseLastSeen } from '../fleet/health.ts'
 import {
   resultKind,
   tallyResults,
@@ -35,6 +48,8 @@ import {
   type OsqueryResultKind,
   type OsqueryRow,
   type OsqueryStewardResult,
+  type OsquerySummary,
+  type OsqueryTally,
 } from './useOsquery.ts'
 
 /** Rows shown per steward before "Show all". */
@@ -49,7 +64,8 @@ const filters: { key: Filter; label: string }[] = [
   { key: 'all', label: 'All' },
   { key: 'rows', label: 'With rows' },
   { key: 'none', label: 'No rows' },
-  { key: 'err', label: 'Errors' },
+  { key: 'unreached', label: 'Not reached' },
+  { key: 'err', label: 'Failed' },
 ]
 
 // Page-specific styles on the design tokens (docs/design/web-ui-design-tokens.css),
@@ -79,6 +95,7 @@ const osqueryStyles = `
 .osq-ran{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;font-size:var(--text-sm);color:var(--text-faint);}
 .osq-ran .mono2{color:var(--text-secondary);font-size:11.5px;}
 .osq-tally{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:var(--text-sm);}
+.osq-tally .osq-brk{color:var(--text-faint);}
 .osq-resbar{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;padding:12px 16px 0;}
 .osq-filt{display:inline-flex;gap:4px;flex-wrap:wrap;}
 .osq-filt button{appearance:none;font:inherit;border:1px solid var(--border);background:transparent;color:var(--text-secondary);font-size:11px;font-weight:600;padding:4px 10px;border-radius:var(--radius-pill);cursor:pointer;}
@@ -92,6 +109,13 @@ const osqueryStyles = `
 .osq-errtext{margin:0;padding:10px 12px;border-top:1px solid var(--state-crit);background:var(--state-crit-bg);color:var(--state-crit);font-family:var(--font-mono);font-size:12px;line-height:1.5;white-space:pre-wrap;overflow-wrap:anywhere;}
 .osq-errtext .osq-errlbl{display:block;margin-bottom:2px;font-family:var(--font-sans);}
 .osq-nonetext{margin:0;padding:10px 12px;border-top:1px dashed var(--border);color:var(--text-secondary);font-size:12.5px;}
+.osq-card.is-unreached{border-color:var(--state-warn);}
+.osq-card.is-unreached .osq-head{background:var(--state-warn-bg);}
+.osq-unreached-note{flex:1 1 260px;min-width:0;color:var(--text-secondary);font-size:12.5px;}
+.osq-unreached-list{list-style:none;margin:0;padding:0;border-top:1px solid var(--state-warn);}
+.osq-unreached-list li{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;padding:7px 12px;}
+.osq-unreached-list li + li{border-top:1px solid var(--border);}
+.osq-seen{font-size:var(--text-sm);color:var(--text-faint);font-variant-numeric:tabular-nums;}
 .osq-twrap{overflow-x:auto;border-top:1px solid var(--border);}
 .osq-tbl{width:100%;border-collapse:collapse;font-size:12px;}
 .osq-tbl th{padding:7px 12px;text-align:left;background:var(--bg-surface);font-family:var(--font-mono);font-size:11px;font-weight:600;color:var(--text-secondary);border-bottom:1px solid var(--border);}
@@ -302,19 +326,103 @@ function ResultCard({ result }: { result: OsqueryStewardResult }) {
   )
 }
 
-function Results({ results, ranAt }: { results: OsqueryStewardResult[]; ranAt: number }) {
+function LastSeen({ lastSeen, queriedAtMs }: { lastSeen: string | null; queriedAtMs: number }) {
+  const ms = lastSeen === null ? null : parseLastSeen(lastSeen)
+  return (
+    <span className="osq-seen" data-testid="osq-last-seen">
+      {lastSeen !== null && ms !== null ? (
+        <time dateTime={new Date(ms).toISOString()} title={new Date(ms).toLocaleString()}>
+          last seen {formatLastSeen(lastSeen, queriedAtMs)}
+        </time>
+      ) : (
+        'no check-in recorded'
+      )}
+    </span>
+  )
+}
+
+/** One group for every steward the query was never sent to; their error text is not shown. */
+function UnreachedGroup({ results, queriedAtMs }: { results: OsqueryStewardResult[]; queriedAtMs: number }) {
+  const n = results.length
+  return (
+    <section
+      className="osq-card is-unreached"
+      aria-label="Not reached"
+      data-testid="osq-unreached-group"
+      data-kind="unreached"
+    >
+      <div className="osq-head">
+        <span className="pill warn">
+          <span className="dot" />
+          Not reached
+        </span>
+        <span className="osq-unreached-note">
+          {n} {n === 1 ? 'steward' : 'stewards'} had no connection to the controller node that ran the query.
+          Nothing was sent to them.
+        </span>
+      </div>
+      <ul className="osq-unreached-list">
+        {results.map((r, i) => (
+          <li key={`${r.stewardId}:${i}`} data-testid="osq-unreached-item">
+            <span className="osq-sid" data-testid="osq-steward-id">
+              {r.stewardId}
+            </span>
+            <LastSeen lastSeen={r.lastSeen} queriedAtMs={queriedAtMs} />
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+/** The API summary's counts plus the client-side with-rows / no-rows breakdown. */
+function Tally({ summary, tally }: { summary: OsquerySummary; tally: OsqueryTally }) {
+  return (
+    <div className="osq-tally" data-testid="osq-tally">
+      <span data-testid="osq-tally-matched">
+        {summary.matched} {summary.matched === 1 ? 'steward' : 'stewards'} matched ·
+      </span>
+      <span className="pill ok" data-testid="osq-tally-answered">
+        {summary.answered} answered
+      </span>
+      <span className="pill warn" data-testid="osq-tally-unreached">
+        {summary.notConnected} not reached
+      </span>
+      <span className="pill crit" data-testid="osq-tally-failed">
+        {summary.failed} failed
+      </span>
+      <span className="osq-brk" data-testid="osq-tally-breakdown">
+        {tally.rows} with rows · {tally.none} no rows
+      </span>
+    </div>
+  )
+}
+
+function Results({
+  results,
+  summary,
+  ranAt,
+}: {
+  results: OsqueryStewardResult[]
+  summary: OsquerySummary
+  ranAt: number
+}) {
   const [filter, setFilter] = useState<Filter>('all')
   const tally = tallyResults(results)
-  const visible = filter === 'all' ? results : results.filter((r) => resultKind(r) === filter)
+  const queriedAtMs = summary.queriedAt ?? ranAt
+  const shows = (kind: OsqueryResultKind) => filter === 'all' || filter === kind
+  const indexed = results.map((result, index) => ({ result, index, kind: resultKind(result) }))
+  const answered = indexed.filter((r) => (r.kind === 'rows' || r.kind === 'none') && shows(r.kind))
+  const unreached = shows('unreached') ? indexed.filter((r) => r.kind === 'unreached').map((r) => r.result) : []
+  const failed = shows('err') ? indexed.filter((r) => r.kind === 'err') : []
+  const empty = answered.length === 0 && unreached.length === 0 && failed.length === 0
+  const card = ({ result, index }: { result: OsqueryStewardResult; index: number }) => (
+    <ResultCard key={`${ranAt}:${result.stewardId}:${index}`} result={result} />
+  )
   return (
     <>
       <div className="osq-resbar">
-        <div className="osq-tally" data-testid="osq-tally">
-          <span>{tally.total} {tally.total === 1 ? 'steward' : 'stewards'} ·</span>
-          <span className="pill ok">{tally.rows} with rows</span>
-          <span className="pill neutral">{tally.none} no rows</span>
-          <span className="pill crit">{tally.err} {tally.err === 1 ? 'error' : 'errors'}</span>
-        </div>
+        <Tally summary={summary} tally={tally} />
         <div className="osq-filt" role="group" aria-label="Filter results">
           {filters.map((f) => (
             <button
@@ -330,12 +438,16 @@ function Results({ results, ranAt }: { results: OsqueryStewardResult[]; ranAt: n
         </div>
       </div>
       <div className="osq-list">
-        {visible.length === 0 ? (
+        {empty ? (
           <p className="osq-nonetext" style={{ border: 0 }}>
             No stewards in this group.
           </p>
         ) : (
-          visible.map((r, i) => <ResultCard key={`${ranAt}:${r.stewardId}:${i}`} result={r} />)
+          <>
+            {answered.map(card)}
+            {unreached.length > 0 && <UnreachedGroup results={unreached} queriedAtMs={queriedAtMs} />}
+            {failed.map(card)}
+          </>
         )}
       </div>
     </>
@@ -531,13 +643,19 @@ export default function OsqueryView() {
             <span className="osq-ran" data-testid="osq-ran">
               <span className="mono2">{describeRequest(state.request)}</span>
               <span className="mono2">{state.request.selector}</span>
-              <span>· ran {new Date(state.ranAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+              <span data-testid="osq-ran-time">
+                · ran{' '}
+                {new Date(state.summary.queriedAt ?? state.ranAt).toLocaleTimeString([], {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })}
+              </span>
             </span>
           )}
         </div>
 
         {state.phase === 'done' && state.results.length > 0 && (
-          <Results results={state.results} ranAt={state.ranAt} />
+          <Results results={state.results} summary={state.summary} ranAt={state.ranAt} />
         )}
 
         {state.phase === 'running' && (
@@ -566,22 +684,27 @@ export default function OsqueryView() {
         )}
 
         {state.phase === 'done' && state.results.length === 0 && (
-          <div data-testid="osq-state-empty">
-            <ResultsNotice icon="⌕" title="No stewards matched">
-              <p>
-                <span className="mono2">{state.request.selector}</span> matched no stewards you can see, so nothing
-                ran. Try the same selector in Fleet to see what it matches.
-              </p>
-              <button
-                type="button"
-                className="wf-btn-sm"
-                onClick={() => openInFleet(state.request.selector)}
-                data-testid="osq-open-fleet"
-              >
-                Open in Fleet
-              </button>
-            </ResultsNotice>
-          </div>
+          <>
+            <div className="osq-resbar">
+              <Tally summary={state.summary} tally={tallyResults(state.results)} />
+            </div>
+            <div data-testid="osq-state-empty">
+              <ResultsNotice icon="⌕" title="No stewards matched">
+                <p>
+                  <span className="mono2">{state.request.selector}</span> matched no stewards you can see, so
+                  nothing ran. Try the same selector in Fleet to see what it matches.
+                </p>
+                <button
+                  type="button"
+                  className="wf-btn-sm"
+                  onClick={() => openInFleet(state.request.selector)}
+                  data-testid="osq-open-fleet"
+                >
+                  Open in Fleet
+                </button>
+              </ResultsNotice>
+            </div>
+          </>
         )}
 
         {state.phase === 'error' && (
