@@ -122,9 +122,8 @@ func (s *Server) handleCreateHypervProfile(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 	tenantID, ok := s.resolveHypervProfileTenant(w, r, principal)
@@ -145,7 +144,7 @@ func (s *Server) handleCreateHypervProfile(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.emitHypervProfileAudit(r, "hyperv_profile.created", tenantID, req.Name)
+	s.emitHypervProfileAudit(r, principal.ID, "hyperv_profile.created", tenantID, req.Name)
 	s.logger.Info("Hyperv profile created", "name", logging.SanitizeLogValue(req.Name), "tenant_id", logging.SanitizeLogValue(tenantID))
 	s.writeResponse(w, http.StatusCreated, hypervProfileResponseFrom(profile))
 }
@@ -157,9 +156,8 @@ func (s *Server) handleGetHypervProfile(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 	tenantID, ok := s.resolveHypervProfileTenant(w, r, principal)
@@ -190,9 +188,8 @@ func (s *Server) handleListHypervProfiles(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 	tenantID, ok := s.resolveHypervProfileTenant(w, r, principal)
@@ -218,9 +215,8 @@ func (s *Server) handleDeleteHypervProfile(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 	tenantID, ok := s.resolveHypervProfileTenant(w, r, principal)
@@ -240,7 +236,7 @@ func (s *Server) handleDeleteHypervProfile(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.emitHypervProfileAudit(r, "hyperv_profile.deleted", tenantID, name)
+	s.emitHypervProfileAudit(r, principal.ID, "hyperv_profile.deleted", tenantID, name)
 	s.logger.Info("Hyperv profile deleted", "name", logging.SanitizeLogValue(name), "tenant_id", logging.SanitizeLogValue(tenantID))
 	s.writeSuccessResponse(w, map[string]string{"deleted": name})
 }
@@ -268,21 +264,16 @@ func (s *Server) writeHypervProfileValidationError(w http.ResponseWriter, name s
 // emitHypervProfileAudit records a create/delete audit event keyed on the
 // cfg-declared resource id "hyperv-profile:<name>" (Issue #3785). No-op when
 // auditManager is unwired.
-func (s *Server) emitHypervProfileAudit(r *http.Request, action, tenantID, name string) {
+func (s *Server) emitHypervProfileAudit(r *http.Request, actorID, action, tenantID, name string) {
 	if s.auditManager == nil {
 		return
-	}
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	principalID := ""
-	if principal != nil {
-		principalID = principal.ID
 	}
 	resourceID := "hyperv-profile:" + name
 	b := audit.NewEventBuilder().
 		Tenant(tenantID).
 		Type(business.AuditEventConfiguration).
 		Action(action).
-		User(principalID, business.AuditUserTypeHuman).
+		User(actorID, business.AuditUserTypeHuman).
 		Resource("hyperv-profile", resourceID, name).
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh).
@@ -292,6 +283,6 @@ func (s *Server) emitHypervProfileAudit(r *http.Request, action, tenantID, name 
 
 	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
 		s.logger.Warn("Failed to emit hyperv profile audit event",
-			"error", err, "action", action, "resource", logging.SanitizeLogValue(resourceID))
+			"error", logging.SanitizeLogValue(err.Error()), "action", action, "resource", logging.SanitizeLogValue(resourceID))
 	}
 }

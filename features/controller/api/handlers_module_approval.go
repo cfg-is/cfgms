@@ -247,7 +247,10 @@ func (s *Server) decideModuleBundle(w http.ResponseWriter, r *http.Request, d mo
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	if !moduleApprovalScopeAllowed(r, principal) {
 		s.writeErrorResponse(w, http.StatusForbidden, d.refusal, "FORBIDDEN")
 		return
@@ -270,7 +273,7 @@ func (s *Server) decideModuleBundle(w http.ResponseWriter, r *http.Request, d mo
 		return
 	}
 
-	s.emitModuleApprovalAudit(r, addr, d.auditEvent)
+	s.emitModuleApprovalAudit(r, principal.ID, addr, d.auditEvent)
 	s.writeSuccessResponse(w, map[string]string{"status": d.status})
 }
 
@@ -308,15 +311,9 @@ func (s *Server) handleModuleDecisionError(w http.ResponseWriter, err error, act
 
 // emitModuleApprovalAudit records a module bundle human-decision audit event.
 // No-op when auditManager is nil.
-func (s *Server) emitModuleApprovalAudit(r *http.Request, addr bundle.ContentAddress, action string) {
+func (s *Server) emitModuleApprovalAudit(r *http.Request, actorID string, addr bundle.ContentAddress, action string) {
 	if s.auditManager == nil {
 		return
-	}
-
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	callerID := ""
-	if principal != nil {
-		callerID = principal.ID
 	}
 
 	resourceID := addr.Publisher + "/" + addr.Name + "@" + addr.Version
@@ -325,7 +322,7 @@ func (s *Server) emitModuleApprovalAudit(r *http.Request, addr bundle.ContentAdd
 		Tenant("root").
 		Type(business.AuditEventSystemAccess).
 		Action(action).
-		User(callerID, business.AuditUserTypeHuman).
+		User(actorID, business.AuditUserTypeHuman).
 		Resource("module_bundle", resourceID, addr.ContentHash).
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh).
@@ -337,7 +334,7 @@ func (s *Server) emitModuleApprovalAudit(r *http.Request, addr bundle.ContentAdd
 
 	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
 		s.logger.Warn("Failed to emit module approval audit event",
-			"error", err, "action", action, "resource", logging.SanitizeLogValue(resourceID))
+			"error", logging.SanitizeLogValue(err.Error()), "action", action, "resource", logging.SanitizeLogValue(resourceID))
 	}
 }
 

@@ -250,13 +250,16 @@ func equalStringSets(a, b []string) bool {
 // The request is signed and sent at once to a connected steward, otherwise on its
 // next connect. Repair and ban race through the same compare-and-swap.
 func (s *Server) handleRepairTamperedSteward(w http.ResponseWriter, r *http.Request) {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	record, ok := s.tamperedStewardRecord(w, r, "POST /api/v1/stewards/{id}/tamper/repair")
 	if !ok {
 		return
 	}
-	delivery := s.repairDeliveryConfig()
-	if s.nonceStore == nil || s.auditManager == nil || delivery == nil {
-		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Repair is not available", "SERVICE_UNAVAILABLE")
+	delivery, ok := s.repairDeliveryOrUnavailable(w)
+	if !ok {
 		return
 	}
 	approved, reason, ok := s.decodeRepairRequest(w, r)
@@ -269,15 +272,27 @@ func (s *Server) handleRepairTamperedSteward(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	// A new request cancels the previous unresolved one.
-	s.cancelUnresolvedRepair(ctx, r, record, "superseded")
+	s.cancelUnresolvedRepair(ctx, principal.ID, record, "superseded")
 
-	repairID, expires, ok := s.storeRepairRequest(ctx, w, r, record, approved, reason)
-	if !ok || !s.repairNotRacedByBan(ctx, w, r, record, repairID) {
+	repairID, expires, ok := s.storeRepairRequest(ctx, w, principal.ID, record, approved, reason)
+	if !ok || !s.repairNotRacedByBan(ctx, w, principal.ID, record, repairID) {
 		return
 	}
 	digest := controlplaneTypes.LossDigest(approved)
 	delivered := s.deliverRepairNow(ctx, delivery, record.ID, repairID, digest, approved, expires)
 	s.writeRepairAccepted(w, repairID, approved, expires, delivered)
+}
+
+// repairDeliveryOrUnavailable returns the repair delivery configuration, or answers 503
+// and returns false when repair cannot run: it needs the nonce store, the audit manager
+// and the delivery configuration.
+func (s *Server) repairDeliveryOrUnavailable(w http.ResponseWriter) (*repairDelivery, bool) {
+	delivery := s.repairDeliveryConfig()
+	if s.nonceStore == nil || s.auditManager == nil || delivery == nil {
+		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Repair is not available", "SERVICE_UNAVAILABLE")
+		return nil, false
+	}
+	return delivery, true
 }
 
 // decodeRepairRequest reads and checks the body: every approved code must be a
@@ -334,7 +349,7 @@ func (s *Server) repairClaimTampered(ctx context.Context, w http.ResponseWriter,
 
 // storeRepairRequest writes the single-use nonce entry and audits the request.
 // On false the response has been written.
-func (s *Server) storeRepairRequest(ctx context.Context, w http.ResponseWriter, r *http.Request, record *business.StewardRecord, approved []string, reason string) (repairID string, expiresUnix int64, ok bool) {
+func (s *Server) storeRepairRequest(ctx context.Context, w http.ResponseWriter, actorID string, record *business.StewardRecord, approved []string, reason string) (repairID string, expiresUnix int64, ok bool) {
 	repairID, err := newRepairID()
 	if err != nil {
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to request repair", "INTERNAL_ERROR")
@@ -343,7 +358,7 @@ func (s *Server) storeRepairRequest(ctx context.Context, w http.ResponseWriter, 
 	expires := time.Now().UTC().Add(repairRequestTTL)
 	digest := controlplaneTypes.LossDigest(approved)
 	entry, _ := json.Marshal(repairRequestEntry{
-		ExpiresAtUnix: expires.Unix(), ApprovedBy: principalIDOf(r), LossDigest: digest, ApprovedLossCodes: approved,
+		ExpiresAtUnix: expires.Unix(), ApprovedBy: actorID, LossDigest: digest, ApprovedLossCodes: approved,
 	})
 	if err := s.nonceStore.PutNonce(ctx, repairRequestKey(record.ID, repairID), entry, repairRequestTTL); err != nil {
 		s.logger.Error("tamper repair: storing the request failed",
@@ -351,7 +366,7 @@ func (s *Server) storeRepairRequest(ctx context.Context, w http.ResponseWriter, 
 		s.writeErrorResponse(w, http.StatusInternalServerError, "Failed to request repair", "INTERNAL_ERROR")
 		return "", 0, false
 	}
-	s.emitIdentityOperatorAudit(ctx, r, auditActionTamperRepairRequested, record, map[string]interface{}{
+	s.emitIdentityOperatorAudit(ctx, actorID, auditActionTamperRepairRequested, record, map[string]interface{}{
 		"repair_id":           repairID,
 		"approved_loss_codes": approved,
 		"loss_digest":         digest,
@@ -363,7 +378,7 @@ func (s *Server) storeRepairRequest(ctx context.Context, w http.ResponseWriter, 
 
 // repairNotRacedByBan withdraws the request when a ban won after the
 // compare-and-swap. On false the response has been written.
-func (s *Server) repairNotRacedByBan(ctx context.Context, w http.ResponseWriter, r *http.Request, record *business.StewardRecord, repairID string) bool {
+func (s *Server) repairNotRacedByBan(ctx context.Context, w http.ResponseWriter, actorID string, record *business.StewardRecord, repairID string) bool {
 	if s.stewardIsTampered(ctx, record.ID) {
 		return true
 	}
@@ -371,7 +386,7 @@ func (s *Server) repairNotRacedByBan(ctx context.Context, w http.ResponseWriter,
 		s.logger.Warn("tamper repair: withdrawing the request failed",
 			"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 	}
-	s.emitIdentityOperatorAudit(ctx, r, auditActionTamperRepairCancelled, record, map[string]interface{}{
+	s.emitIdentityOperatorAudit(ctx, actorID, auditActionTamperRepairCancelled, record, map[string]interface{}{
 		"repair_id": repairID, "reason": "steward_no_longer_tampered",
 	})
 	s.writeErrorResponse(w, http.StatusConflict, "Steward is no longer tampered", "STEWARD_NOT_TAMPERED")
@@ -403,13 +418,6 @@ func (s *Server) writeRepairAccepted(w http.ResponseWriter, repairID string, app
 			"It keeps its ID, local logs and action history, except for the loss you approved. If an unauthorized party holds a copy of the " +
 			"steward's keys and completes first, that party wins and the steward's credentials are refused; the controller then marks it contested.",
 	}}, "tamper repair accepted")
-}
-
-func principalIDOf(r *http.Request) string {
-	if p, _ := r.Context().Value(principalContextKey).(*Principal); p != nil {
-		return p.ID
-	}
-	return ""
 }
 
 // sendRepair signs the repair request over (steward ID, repair ID, loss digest,
@@ -459,7 +467,7 @@ func (s *Server) repairReadable() bool { return s.stewardStore != nil && s.audit
 // cancelUnresolvedRepair cancels the steward's previous unresolved repair, if any:
 // the nonce is consumed so it can no longer complete, and the cancellation is
 // audited.
-func (s *Server) cancelUnresolvedRepair(ctx context.Context, r *http.Request, record *business.StewardRecord, why string) {
+func (s *Server) cancelUnresolvedRepair(ctx context.Context, actorID string, record *business.StewardRecord, why string) {
 	view, err := s.latestRepair(ctx, record)
 	if err != nil || view == nil || !view.Unresolved {
 		return
@@ -468,7 +476,7 @@ func (s *Server) cancelUnresolvedRepair(ctx context.Context, r *http.Request, re
 		s.logger.Warn("tamper repair: consuming the previous request failed",
 			"steward_id", logging.SanitizeLogValue(record.ID), "error", logging.SanitizeLogValue(err.Error()))
 	}
-	s.emitIdentityOperatorAudit(ctx, r, auditActionTamperRepairCancelled, record, map[string]interface{}{
+	s.emitIdentityOperatorAudit(ctx, actorID, auditActionTamperRepairCancelled, record, map[string]interface{}{
 		"repair_id": view.RepairID, "reason": why,
 	})
 }

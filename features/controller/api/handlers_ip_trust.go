@@ -43,6 +43,11 @@ func (s *Server) handleAddIPTrust(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	var req addIPTrustRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -76,7 +81,7 @@ func (s *Server) handleAddIPTrust(w http.ResponseWriter, r *http.Request) {
 		"tenant_id", logging.SanitizeLogValue(req.TenantID),
 		"cidr", logging.SanitizeLogValue(req.CIDR),
 		"pre_seeded", req.PreSeeded)
-	s.emitIPTrustAudit(r, "ip_trust.added", req.TenantID, req.CIDR)
+	s.emitIPTrustAudit(r, principal.ID, "ip_trust.added", req.TenantID, req.CIDR)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -87,6 +92,11 @@ func (s *Server) handleAddIPTrust(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleRevokeIPTrust(w http.ResponseWriter, r *http.Request) {
 	if s.ipTrustStore == nil {
 		http.Error(w, "ip-trust store unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 
@@ -125,7 +135,7 @@ func (s *Server) handleRevokeIPTrust(w http.ResponseWriter, r *http.Request) {
 	s.logger.Info("IP trust range revoked",
 		"tenant_id", logging.SanitizeLogValue(tenantID),
 		"cidr", logging.SanitizeLogValue(cidr))
-	s.emitIPTrustAudit(r, "ip_trust.revoked", tenantID, cidr)
+	s.emitIPTrustAudit(r, principal.ID, "ip_trust.revoked", tenantID, cidr)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -186,7 +196,7 @@ func (s *Server) handleListIPTrust(w http.ResponseWriter, r *http.Request) {
 
 // emitIPTrustAudit records an audit event for an IP trust mutation (add or revoke).
 // It is a no-op when auditManager is nil.
-func (s *Server) emitIPTrustAudit(r *http.Request, action, tenantID, cidr string) {
+func (s *Server) emitIPTrustAudit(r *http.Request, actorID, action, tenantID, cidr string) {
 	if s.auditManager == nil {
 		return
 	}
@@ -194,16 +204,11 @@ func (s *Server) emitIPTrustAudit(r *http.Request, action, tenantID, cidr string
 	if auditTenantID == "" {
 		auditTenantID = audit.SystemTenantID
 	}
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	principalID := ""
-	if principal != nil {
-		principalID = principal.ID
-	}
 	b := audit.NewEventBuilder().
 		Tenant(auditTenantID).
 		Type(business.AuditEventSystemAccess).
 		Action(action).
-		User(principalID, business.AuditUserTypeHuman).
+		User(actorID, business.AuditUserTypeHuman).
 		Resource("ip_trust", cidr, "").
 		Result(business.AuditResultSuccess).
 		Severity(business.AuditSeverityHigh).
