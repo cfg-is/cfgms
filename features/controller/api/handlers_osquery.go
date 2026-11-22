@@ -6,6 +6,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -15,6 +16,7 @@ import (
 	"github.com/cfgis/cfgms/features/controller/fleet"
 	"github.com/cfgis/cfgms/features/controller/fleet/selector"
 	"github.com/cfgis/cfgms/features/controller/health"
+	stewardosquery "github.com/cfgis/cfgms/features/controller/osquery"
 	osquerymodule "github.com/cfgis/cfgms/features/modules/extended/osquery"
 	"github.com/cfgis/cfgms/pkg/audit"
 	"github.com/cfgis/cfgms/pkg/logging"
@@ -37,15 +39,43 @@ type osqueryQueryRequest struct {
 	Selector  string            `json:"selector"`
 }
 
+// Per-steward outcome values carried on the wire in osqueryStewardResult.Outcome
+// (Epic #6439). These are distinct from the osqueryOutcome* set below, which is
+// the request-level signal label (ok/partial/failed) of the live-query metrics.
+const (
+	osqueryResultAnswered     = "answered"      // the steward returned a result (rows may be empty)
+	osqueryResultNotConnected = "not_connected" // no open query stream on this node; nothing was sent
+	osqueryResultFailed       = "failed"        // any other dispatch error: refused, not sent, or ended in an error
+)
+
 // osqueryStewardResult is one steward's result within the aggregate response.
+// Rows holds the answer of an answered steward; Error holds the sanitized error
+// text of a not_connected or failed steward. Outcome is always one of the
+// osqueryResult* values. LastSeen is set only on a not_connected result, from
+// the fleet record's last heartbeat (see osqueryLastSeen).
 type osqueryStewardResult struct {
 	StewardID string              `json:"steward_id"`
 	Rows      []map[string]string `json:"rows,omitempty"`
 	Error     string              `json:"error,omitempty"`
+	Outcome   string              `json:"outcome"`
+	LastSeen  *time.Time          `json:"last_seen,omitempty"`
 }
 
-// osqueryQueryResponse is returned by POST /api/v1/osquery/query.
+// osqueryQuerySummary states how complete the answer is: how many stewards the
+// selector matched and how many of them ended in each outcome. QueriedAt is the
+// UTC time the fan-out was dispatched.
+type osqueryQuerySummary struct {
+	Matched      int       `json:"matched"`
+	Answered     int       `json:"answered"`
+	NotConnected int       `json:"not_connected"`
+	Failed       int       `json:"failed"`
+	QueriedAt    time.Time `json:"queried_at"`
+}
+
+// osqueryQueryResponse is returned by POST /api/v1/osquery/query: a summary of
+// the answer's completeness and one result per matched steward, in match order.
 type osqueryQueryResponse struct {
+	Summary osqueryQuerySummary    `json:"summary"`
 	Results []osqueryStewardResult `json:"results"`
 }
 
@@ -54,7 +84,9 @@ type osqueryQueryResponse struct {
 // Accepts a catalog query ID, optional typed parameters, and a fleet selector.
 // Dispatches to each targeted steward via S7's (Issue #3566) QuerySteward method,
 // and returns per-steward results with partial success on individual steward
-// failures. Every execution is audited.
+// failures. Each result carries an outcome (answered, not_connected or failed),
+// and the response carries a summary with the matched count, the count per
+// outcome and the dispatch time. Every execution is audited.
 func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 	if s.osqueryDispatcher == nil {
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Osquery dispatch not configured", "SERVICE_UNAVAILABLE")
@@ -66,30 +98,8 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req osqueryQueryRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
-		return
-	}
-
-	if req.CatalogID == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "catalog_id is required", "MISSING_CATALOG_ID")
-		return
-	}
-
-	entry, err := osquerymodule.LookupCatalogEntry(req.CatalogID)
-	if err != nil {
-		s.logger.Debug("Unknown osquery catalog id",
-			"catalog_id", logging.SanitizeLogValue(req.CatalogID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusBadRequest, "Unknown catalog_id", "INVALID_CATALOG_ID")
-		return
-	}
-	if err := osquerymodule.ValidateParams(entry, req.Params); err != nil {
-		s.logger.Debug("Invalid osquery params",
-			"catalog_id", logging.SanitizeLogValue(req.CatalogID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid params for catalog_id", "INVALID_PARAMS")
+	req, ok := s.decodeOsqueryQueryRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -124,12 +134,48 @@ func (s *Server) handleOsqueryQuery(w http.ResponseWriter, r *http.Request) {
 
 	// Fan-out to all targeted stewards concurrently; collect partial results.
 	dispatchStart := time.Now()
-	results := s.fanOutOsqueryQuery(r.Context(), stewardIDs, req)
+	results := s.fanOutOsqueryQuery(r.Context(), stewards, req)
 	s.recordOsqueryQuerySignals(time.Since(dispatchStart), results)
 
 	s.emitOsqueryAudit(r, principal.ID, req.CatalogID, stewardIDs)
 
-	s.writeSuccessResponse(w, osqueryQueryResponse{Results: results})
+	s.writeSuccessResponse(w, osqueryQueryResponse{
+		Summary: summarizeOsqueryResults(results, dispatchStart),
+		Results: results,
+	})
+}
+
+// decodeOsqueryQueryRequest decodes the body of POST /api/v1/osquery/query and
+// validates its catalog_id and params against the catalog. On false the error
+// response has been written.
+func (s *Server) decodeOsqueryQueryRequest(w http.ResponseWriter, r *http.Request) (osqueryQueryRequest, bool) {
+	var req osqueryQueryRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
+		return osqueryQueryRequest{}, false
+	}
+
+	if req.CatalogID == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "catalog_id is required", "MISSING_CATALOG_ID")
+		return osqueryQueryRequest{}, false
+	}
+
+	entry, err := osquerymodule.LookupCatalogEntry(req.CatalogID)
+	if err != nil {
+		s.logger.Debug("Unknown osquery catalog id",
+			"catalog_id", logging.SanitizeLogValue(req.CatalogID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest, "Unknown catalog_id", "INVALID_CATALOG_ID")
+		return osqueryQueryRequest{}, false
+	}
+	if err := osquerymodule.ValidateParams(entry, req.Params); err != nil {
+		s.logger.Debug("Invalid osquery params",
+			"catalog_id", logging.SanitizeLogValue(req.CatalogID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid params for catalog_id", "INVALID_PARAMS")
+		return osqueryQueryRequest{}, false
+	}
+	return req, true
 }
 
 // osqueryTargetFilter parses the fleet selector of an osquery dispatch and enforces the
@@ -177,26 +223,71 @@ func (s *Server) osqueryTargetFilter(w http.ResponseWriter, r *http.Request, sel
 }
 
 // fanOutOsqueryQuery queries every steward concurrently and returns one result per
-// steward, in stewardIDs order. A steward's failure is recorded in its own result.
-func (s *Server) fanOutOsqueryQuery(ctx context.Context, stewardIDs []string, req osqueryQueryRequest) []osqueryStewardResult {
-	results := make([]osqueryStewardResult, len(stewardIDs))
+// steward, in stewards order. A steward's failure is recorded in its own result.
+func (s *Server) fanOutOsqueryQuery(ctx context.Context, stewards []fleet.StewardResult, req osqueryQueryRequest) []osqueryStewardResult {
+	results := make([]osqueryStewardResult, len(stewards))
 	var wg sync.WaitGroup
-	for i, stewardID := range stewardIDs {
+	for i, sr := range stewards {
 		wg.Add(1)
-		go func(idx int, sid string) {
+		go func(idx int, sr fleet.StewardResult) {
 			defer wg.Done()
-			rows, dispErr := s.osqueryDispatcher.QuerySteward(ctx, sid, req.CatalogID, req.Params)
-			res := osqueryStewardResult{StewardID: sid}
-			if dispErr != nil {
-				res.Error = logging.SanitizeLogValue(dispErr.Error())
-			} else {
-				res.Rows = rowsToMaps(rows)
-			}
-			results[idx] = res
-		}(i, stewardID)
+			rows, dispErr := s.osqueryDispatcher.QuerySteward(ctx, sr.ID, req.CatalogID, req.Params)
+			results[idx] = newOsqueryStewardResult(sr, rows, dispErr)
+		}(i, sr)
 	}
 	wg.Wait()
 	return results
+}
+
+// newOsqueryStewardResult classifies one steward's dispatch result. A nil error
+// is answered; the controller's ErrStewardNotConnected sentinel (matched by
+// identity, wrapped or not) is not_connected; every other error is failed. The
+// sanitized error text is kept on both error outcomes.
+func newOsqueryStewardResult(sr fleet.StewardResult, rows []*transportpb.OsqueryRow, dispErr error) osqueryStewardResult {
+	res := osqueryStewardResult{StewardID: sr.ID}
+	switch {
+	case dispErr == nil:
+		res.Rows = rowsToMaps(rows)
+		res.Outcome = osqueryResultAnswered
+	case errors.Is(dispErr, stewardosquery.ErrStewardNotConnected):
+		res.Error = logging.SanitizeLogValue(dispErr.Error())
+		res.Outcome = osqueryResultNotConnected
+		res.LastSeen = osqueryLastSeen(sr.LastHeartbeat)
+	default:
+		res.Error = logging.SanitizeLogValue(dispErr.Error())
+		res.Outcome = osqueryResultFailed
+	}
+	return res
+}
+
+// osqueryLastSeen returns the last_seen value of a not_connected result: the
+// fleet record's last heartbeat in UTC. A zero heartbeat (the steward was never
+// heard from) yields nil, so last_seen is omitted. This zero-time rule lives
+// here alone so it can be changed in one place.
+func osqueryLastSeen(lastHeartbeat time.Time) *time.Time {
+	if lastHeartbeat.IsZero() {
+		return nil
+	}
+	t := lastHeartbeat.UTC()
+	return &t
+}
+
+// summarizeOsqueryResults counts the results by outcome. Every result lands in
+// exactly one count, so answered + not_connected + failed == matched holds by
+// construction; an unrecognised outcome counts as failed.
+func summarizeOsqueryResults(results []osqueryStewardResult, queriedAt time.Time) osqueryQuerySummary {
+	sum := osqueryQuerySummary{Matched: len(results), QueriedAt: queriedAt.UTC()}
+	for _, res := range results {
+		switch res.Outcome {
+		case osqueryResultAnswered:
+			sum.Answered++
+		case osqueryResultNotConnected:
+			sum.NotConnected++
+		default:
+			sum.Failed++
+		}
+	}
+	return sum
 }
 
 // Live-query signals (Issue #6059). Every label value comes from the closed sets
