@@ -511,9 +511,8 @@ func (s *Server) approveStewardBinaryCaller(w http.ResponseWriter, r *http.Reque
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Steward binary approval not available", "APPROVAL_UNAVAILABLE")
 		return nil, "", false
 	}
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if principal == nil || principal.ID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return nil, "", false
 	}
 	tenantID, tenantOK := s.installerBlobTenantForCallerScope(r)

@@ -60,9 +60,8 @@ func (s *Server) handlePutUnattendedRollout(w http.ResponseWriter, r *http.Reque
 		s.writeErrorResponse(w, http.StatusServiceUnavailable, "Unattended rollout store not available", "SERVICE_UNAVAILABLE")
 		return
 	}
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if principal == nil || principal.ID == "" {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 	enabled, ok := s.decodeUnattendedRolloutRequest(w, r)
