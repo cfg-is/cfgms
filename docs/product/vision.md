@@ -183,10 +183,18 @@ investigation, even when those devices no longer match the filter.
 ## Delivery direction
 
 Early beta includes Windows, macOS and Linux endpoints, Microsoft 365 integration,
-the query workspace and agentic cockpit. The [roadmap](roadmap.md) owns detailed
-launch coverage, integration priorities, existing-work pointers and deferred scope.
-Self-hosting product work, standalone steward product work, Outpost and DEX
-experiences are deferred while SaaS takes priority.
+the query workspace and agentic cockpit. CFGMS is not an MDM: Intune keeps the
+MDM functions and is managed through CFGMS, while the steward does everything an
+agent can do on the device. Launch adds new-computer setup on all three platforms, application
+install through native package managers, patching, and Microsoft 365 and Intune
+baselines. The [roadmap](roadmap.md) owns detailed launch coverage, integration
+priorities, existing-work pointers and deferred scope.
+
+Network management through Outpost and network-experience diagnostics (call
+quality and DNS: is the problem inside the client's network or not?) are equal
+launch-stretch priorities, built when capacity allows. Self-hosting product work,
+standalone steward product work and the wider DEX experience are deferred while
+SaaS takes priority.
 
 DEX should establish application/device baselines and guide hardware decisions
 using measured user experience rather than age alone. Estimated productivity
