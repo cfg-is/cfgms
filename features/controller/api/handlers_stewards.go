@@ -951,6 +951,13 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// The delivery record names the caller as its issuer, so a request with no
+	// acting principal is refused before anything is stored.
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	// Resolve the tenant the config is stored under. This endpoint targets a
 	// specific steward, so the config must be stored under THAT steward's
 	// tenant — not the caller's. Using the caller's tenant would store the
@@ -1011,7 +1018,7 @@ func (s *Server) handleUpdateStewardConfig(w http.ResponseWriter, r *http.Reques
 		"tenant_id":  tenantID,
 		"message":    "Configuration stored successfully",
 	}
-	s.recordConfigUpdateDelivery(r, stewardID, tenantID, stewardIDForLog, resp)
+	s.recordConfigUpdateDelivery(r, principal, stewardID, tenantID, stewardIDForLog, resp)
 	if _, ok := resp["command_id"]; !ok {
 		// No commandStore configured, or the delivery row failed to persist —
 		// fall back to a plain storage acknowledgement rather than claiming a
@@ -1143,16 +1150,12 @@ func (s *Server) storeStewardConfig(w http.ResponseWriter, r *http.Request, tena
 }
 
 // recordConfigUpdateDelivery records a durable sync_config outbox row for a
-// stored config update and attempts delivery, adding command_id and
+// stored config update, issued by principal, and attempts delivery, adding command_id and
 // delivery_status to resp. It leaves resp untouched when no command store is
 // configured or the row fails to persist.
-func (s *Server) recordConfigUpdateDelivery(r *http.Request, stewardID, tenantID, stewardIDForLog string, resp map[string]any) {
+func (s *Server) recordConfigUpdateDelivery(r *http.Request, principal *Principal, stewardID, tenantID, stewardIDForLog string, resp map[string]any) {
 	if s.commandStore == nil {
 		return
-	}
-	var issuedBy string
-	if principal, ok := r.Context().Value(principalContextKey).(*Principal); ok && principal != nil {
-		issuedBy = principal.ID
 	}
 	rec := &business.CommandRecord{
 		ID:             "cfg-update-" + stewardID + "-" + uuid.NewString(),
@@ -1160,7 +1163,7 @@ func (s *Server) recordConfigUpdateDelivery(r *http.Request, stewardID, tenantID
 		StewardID:      stewardID,
 		TenantID:       tenantID,
 		IssuedAt:       time.Now().UTC(),
-		IssuedBy:       issuedBy,
+		IssuedBy:       principal.ID,
 		DeliveryStatus: business.DeliveryStatusPending,
 	}
 	if err := s.commandStore.CreateCommandRecord(r.Context(), rec); err != nil {
@@ -1327,6 +1330,13 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// The audit event names the caller, so a request with no acting principal is
+	// refused before the steward is tombstoned.
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	if s.stewardStore == nil {
 		s.logger.Error("decommission failed: steward store not configured",
 			"steward_id", logging.SanitizeLogValue(stewardID))
@@ -1409,15 +1419,8 @@ func (s *Server) handleDecommissionSteward(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Emit audit event.
-	auditTenantID := callerTenant
-	if auditTenantID == "" {
-		auditTenantID = audit.SystemTenantID
-	}
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	principalID := ""
-	if principal != nil {
-		principalID = principal.ID
-	}
+	auditTenantID := auditTenantOrSystem(callerTenant)
+	principalID := principal.ID
 	s.emitDecommissionAudit(r.Context(), auditTenantID, principalID, stewardID)
 
 	s.logger.Info("Steward decommissioned",
@@ -1463,6 +1466,13 @@ func (s *Server) handleSetStewardVisibility(w http.ResponseWriter, r *http.Reque
 
 	if !identifierRegex.MatchString(stewardID) {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid steward ID format", "INVALID_STEWARD_ID")
+		return
+	}
+
+	// The audit event names the caller, so a request with no acting principal is
+	// refused before the visibility changes.
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 
@@ -1516,15 +1526,8 @@ func (s *Server) handleSetStewardVisibility(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Emit audit event at Medium severity: concealment-capable but reversible (Issue #2918 security ruling).
-	auditTenantID := callerTenant
-	if auditTenantID == "" {
-		auditTenantID = audit.SystemTenantID
-	}
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	principalID := ""
-	if principal != nil {
-		principalID = principal.ID
-	}
+	auditTenantID := auditTenantOrSystem(callerTenant)
+	principalID := principal.ID
 	s.emitVisibilityAudit(r.Context(), auditTenantID, principalID, stewardID, req.Hidden)
 
 	// The logged state is selected through control flow rather than read off the
