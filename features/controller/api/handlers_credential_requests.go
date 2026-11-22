@@ -431,6 +431,11 @@ func (s *Server) handleMintEnrolmentToken(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+
 	var req MintEnrolmentTokenRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeErrorResponse(w, http.StatusBadRequest, "Invalid JSON body", "INVALID_JSON")
@@ -458,19 +463,13 @@ func (s *Server) handleMintEnrolmentToken(w http.ResponseWriter, r *http.Request
 	}
 
 	now := time.Now().UTC()
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	createdBy := ""
-	if principal != nil {
-		createdBy = principal.ID
-	}
-
 	tok := &enrolmentToken{
 		ID:          "et-" + uuid.New().String(),
 		TenantID:    req.TenantID,
 		TokenHash:   hashCredentialSecret(rawToken),
 		TokenPrefix: enrolmentTokenDisplayPrefix(rawToken),
 		CreatedAt:   now,
-		CreatedBy:   createdBy,
+		CreatedBy:   principal.ID,
 		ExpiresAt:   now.Add(enrolmentTokenTTL),
 	}
 	if err := s.persistEnrolmentToken(r.Context(), tok); err != nil {
@@ -483,7 +482,7 @@ func (s *Server) handleMintEnrolmentToken(w http.ResponseWriter, r *http.Request
 		"token_id", logging.SanitizeLogValue(tok.ID),
 		"token_prefix", logging.SanitizeLogValue(tok.TokenPrefix),
 		"tenant_id", logging.SanitizeLogValue(tok.TenantID))
-	s.emitCredentialRequestAudit(r.Context(), "enrolment_token.minted", tok.TenantID, createdBy,
+	s.emitCredentialRequestAudit(r.Context(), "enrolment_token.minted", tok.TenantID, principal.ID,
 		business.AuditUserTypeHuman, "enrolment_token", tok.ID,
 		business.AuditResultSuccess, business.AuditSeverityHigh, nil)
 

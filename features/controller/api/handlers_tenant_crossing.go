@@ -135,7 +135,10 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	callerTenant := callerTenantFilter(r.Context())
 
 	// "root" is the SaaS operator's own scope, not an MSP that can consent to being
@@ -188,34 +191,12 @@ func (s *Server) handleCreateTenantCrossingGrant(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// A grant names no person: it opens the MSP to all root support for a duration. A
-	// body that carries principal_id (even an empty one) is refused rather than ignored,
-	// so a client written for the old per-principal model fails loudly.
-	var req struct {
-		PrincipalID     *string `json:"principal_id"`
-		DurationMinutes int     `json:"duration_minutes"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, tenantCrossingMaxBodyBytes)).Decode(&req); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
-		return
-	}
-	if req.PrincipalID != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			"an access grant names no principal; send duration_minutes only", "GRANT_PRINCIPAL_NOT_ALLOWED")
-		return
-	}
-	duration := time.Duration(req.DurationMinutes) * time.Minute
-	if req.DurationMinutes <= 0 || duration > maxTenantCrossingGrantDuration {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			fmt.Sprintf("duration_minutes must be between 1 and %d", int(maxTenantCrossingGrantDuration.Minutes())),
-			"INVALID_DURATION")
+	duration, ok := s.decodeCrossingGrantDuration(w, r)
+	if !ok {
 		return
 	}
 
-	var callerID string
-	if principal != nil {
-		callerID = principal.ID
-	}
+	callerID := principal.ID
 	now := time.Now().UTC()
 	crossing := &business.TenantCrossing{
 		ID:       uuid.New().String(),
@@ -269,7 +250,10 @@ func (s *Server) handleTenantBreakGlass(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	// The same predicate authorizeTenantAccess uses to issue the crossing challenge:
 	// every caller the boundary sends here must be able to complete break-glass.
 	if !subjectToTenantCrossingBoundary(principal) {
@@ -290,41 +274,8 @@ func (s *Server) handleTenantBreakGlass(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// The body carries the category and, preferably, the justification; the
-	// X-Justification header is a fallback for the justification only. An empty or
-	// absent body is not a decode error here: it must still reach the category check.
-	var req struct {
-		ReasonCategory string `json:"reason_category"`
-		Justification  string `json:"justification"`
-	}
-	if body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, tenantCrossingMaxBodyBytes)); err != nil {
-		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
-		return
-	} else if len(bytes.TrimSpace(body)) > 0 {
-		if err := json.Unmarshal(body, &req); err != nil {
-			s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
-			return
-		}
-	}
-
-	category := business.TenantCrossingReasonCategory(strings.TrimSpace(req.ReasonCategory))
-	if category == "" {
-		s.writeErrorResponse(w, http.StatusBadRequest, "reason_category is required", "REASON_CATEGORY_REQUIRED")
-		return
-	}
-	if !business.ValidTenantCrossingReasonCategory(category) {
-		s.writeErrorResponse(w, http.StatusBadRequest, "reason_category is not a recognized category", "INVALID_REASON_CATEGORY")
-		return
-	}
-
-	justification := strings.TrimSpace(req.Justification)
-	if justification == "" {
-		justification = strings.TrimSpace(r.Header.Get("X-Justification"))
-	}
-	if len(justification) < tenantCrossingJustificationMinLen || len(justification) > tenantCrossingJustificationMaxLen {
-		s.writeErrorResponse(w, http.StatusBadRequest,
-			fmt.Sprintf("justification is required (%d-%d characters) in the request body or X-Justification header", tenantCrossingJustificationMinLen, tenantCrossingJustificationMaxLen),
-			"JUSTIFICATION_REQUIRED")
+	category, justification, ok := s.parseBreakGlassRequest(w, r)
+	if !ok {
 		return
 	}
 
@@ -387,8 +338,11 @@ func (s *Server) handleApproveTenantBreakGlass(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
-	if !subjectToTenantCrossingBoundary(principal) || principal.ID == "" {
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
+	if !subjectToTenantCrossingBoundary(principal) {
 		s.writeErrorResponse(w, http.StatusForbidden, "break-glass approval is only available to root-scoped callers", "NOT_ROOT_SCOPED")
 		return
 	}
@@ -417,18 +371,7 @@ func (s *Server) handleApproveTenantBreakGlass(w http.ResponseWriter, r *http.Re
 
 	now := time.Now().UTC()
 	if err := s.tenantCrossingStore.ApproveTenantCrossing(r.Context(), crossing.ID, principal.ID, now, now.Add(tenantCrossingBreakGlassDuration)); err != nil {
-		if errors.Is(err, business.ErrTenantCrossingNotPending) {
-			s.writeErrorResponse(w, http.StatusConflict, "crossing is not pending approval", "NOT_PENDING")
-			return
-		}
-		if errors.Is(err, business.ErrTenantCrossingNotFound) {
-			s.writeErrorResponse(w, http.StatusNotFound, "crossing not found", "CROSSING_NOT_FOUND")
-			return
-		}
-		s.logger.Error("Failed to approve tenant crossing",
-			"tenant_id", logging.SanitizeLogValue(tenantID),
-			"error", logging.SanitizeLogValue(err.Error()))
-		s.writeErrorResponse(w, http.StatusInternalServerError, "failed to approve break-glass", "APPROVE_FAILED")
+		s.writeApproveBreakGlassError(w, tenantID, err)
 		return
 	}
 	if updated, gerr := s.tenantCrossingStore.GetTenantCrossing(r.Context(), crossing.ID); gerr == nil && updated != nil {
@@ -582,7 +525,10 @@ func (s *Server) handleEndTenantCrossing(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
+		return
+	}
 	callerTenant := callerTenantFilter(r.Context())
 
 	existing, err := s.tenantManager.GetTenant(r.Context(), tenantID)
@@ -621,26 +567,9 @@ func (s *Server) handleEndTenantCrossing(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var callerID string
-	if principal != nil {
-		callerID = principal.ID
-	}
-	rootScoped := subjectToTenantCrossingBoundary(principal)
-	switch crossing.Kind {
-	case business.TenantCrossingKindGrant:
-		if rootScoped {
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"root-scoped callers cannot end access grants", "ROOT_SCOPED_CANNOT_END_GRANT")
-			return
-		}
-	default:
-		// Break-glass: the invoker, or a caller not subject to the boundary (the owning
-		// MSP's administrator, already authorized for this tenant above).
-		if rootScoped && (callerID == "" || crossing.GrantedBy != callerID) {
-			s.writeErrorResponse(w, http.StatusForbidden,
-				"only the invoker or an administrator of the owning tenant can end a break-glass crossing", "NOT_CROSSING_OWNER")
-			return
-		}
+	callerID := principal.ID
+	if !s.callerMayEndCrossing(w, principal, crossing) {
+		return
 	}
 
 	if crossing.RevokedAt != nil || !crossing.ExpiresAt.After(time.Now()) {
@@ -666,4 +595,114 @@ func (s *Server) handleEndTenantCrossing(w http.ResponseWriter, r *http.Request)
 	s.recordTenantCrossingAudit(r, existing.ID, callerID, crossing, severity, action, "ended early")
 
 	s.writeResponse(w, http.StatusOK, s.toTenantCrossingResponse(r.Context(), crossing))
+}
+
+// decodeCrossingGrantDuration reads the grant body and returns the requested duration,
+// or writes a 400 and returns false. A grant names no person: it opens the MSP to all
+// root support for a duration. A body that carries principal_id (even an empty one) is
+// refused rather than ignored, so a client written for the old per-principal model
+// fails loudly.
+func (s *Server) decodeCrossingGrantDuration(w http.ResponseWriter, r *http.Request) (time.Duration, bool) {
+	var req struct {
+		PrincipalID     *string `json:"principal_id"`
+		DurationMinutes int     `json:"duration_minutes"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, tenantCrossingMaxBodyBytes)).Decode(&req); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		return 0, false
+	}
+	if req.PrincipalID != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			"an access grant names no principal; send duration_minutes only", "GRANT_PRINCIPAL_NOT_ALLOWED")
+		return 0, false
+	}
+	duration := time.Duration(req.DurationMinutes) * time.Minute
+	if req.DurationMinutes <= 0 || duration > maxTenantCrossingGrantDuration {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			fmt.Sprintf("duration_minutes must be between 1 and %d", int(maxTenantCrossingGrantDuration.Minutes())),
+			"INVALID_DURATION")
+		return 0, false
+	}
+	return duration, true
+}
+
+// parseBreakGlassRequest reads the break-glass body and returns its reason category and
+// justification, or writes a 400 and returns false. The body carries the category and,
+// preferably, the justification; the X-Justification header is a fallback for the
+// justification only. An empty or absent body is not a decode error here: it must still
+// reach the category check.
+func (s *Server) parseBreakGlassRequest(w http.ResponseWriter, r *http.Request) (business.TenantCrossingReasonCategory, string, bool) {
+	var req struct {
+		ReasonCategory string `json:"reason_category"`
+		Justification  string `json:"justification"`
+	}
+	if body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, tenantCrossingMaxBodyBytes)); err != nil {
+		s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+		return "", "", false
+	} else if len(bytes.TrimSpace(body)) > 0 {
+		if err := json.Unmarshal(body, &req); err != nil {
+			s.writeErrorResponse(w, http.StatusBadRequest, "invalid request body", "INVALID_REQUEST")
+			return "", "", false
+		}
+	}
+
+	category := business.TenantCrossingReasonCategory(strings.TrimSpace(req.ReasonCategory))
+	if category == "" {
+		s.writeErrorResponse(w, http.StatusBadRequest, "reason_category is required", "REASON_CATEGORY_REQUIRED")
+		return "", "", false
+	}
+	if !business.ValidTenantCrossingReasonCategory(category) {
+		s.writeErrorResponse(w, http.StatusBadRequest, "reason_category is not a recognized category", "INVALID_REASON_CATEGORY")
+		return "", "", false
+	}
+
+	justification := strings.TrimSpace(req.Justification)
+	if justification == "" {
+		justification = strings.TrimSpace(r.Header.Get("X-Justification"))
+	}
+	if len(justification) < tenantCrossingJustificationMinLen || len(justification) > tenantCrossingJustificationMaxLen {
+		s.writeErrorResponse(w, http.StatusBadRequest,
+			fmt.Sprintf("justification is required (%d-%d characters) in the request body or X-Justification header", tenantCrossingJustificationMinLen, tenantCrossingJustificationMaxLen),
+			"JUSTIFICATION_REQUIRED")
+		return "", "", false
+	}
+	return category, justification, true
+}
+
+// writeApproveBreakGlassError maps a failed ApproveTenantCrossing store call to its response.
+func (s *Server) writeApproveBreakGlassError(w http.ResponseWriter, tenantID string, err error) {
+	if errors.Is(err, business.ErrTenantCrossingNotPending) {
+		s.writeErrorResponse(w, http.StatusConflict, "crossing is not pending approval", "NOT_PENDING")
+		return
+	}
+	if errors.Is(err, business.ErrTenantCrossingNotFound) {
+		s.writeErrorResponse(w, http.StatusNotFound, "crossing not found", "CROSSING_NOT_FOUND")
+		return
+	}
+	s.logger.Error("Failed to approve tenant crossing",
+		"tenant_id", logging.SanitizeLogValue(tenantID),
+		"error", logging.SanitizeLogValue(err.Error()))
+	s.writeErrorResponse(w, http.StatusInternalServerError, "failed to approve break-glass", "APPROVE_FAILED")
+}
+
+// callerMayEndCrossing reports whether principal may end crossing, or writes a 403 and
+// returns false. A grant is never ended by a root-scoped caller. A break-glass crossing
+// is ended by the root principal that invoked it, or by a caller not subject to the
+// boundary (the owning MSP's administrator, already authorized for this tenant).
+func (s *Server) callerMayEndCrossing(w http.ResponseWriter, principal *Principal, crossing *business.TenantCrossing) bool {
+	rootScoped := subjectToTenantCrossingBoundary(principal)
+	if crossing.Kind == business.TenantCrossingKindGrant {
+		if rootScoped {
+			s.writeErrorResponse(w, http.StatusForbidden,
+				"root-scoped callers cannot end access grants", "ROOT_SCOPED_CANNOT_END_GRANT")
+			return false
+		}
+		return true
+	}
+	if rootScoped && crossing.GrantedBy != principal.ID {
+		s.writeErrorResponse(w, http.StatusForbidden,
+			"only the invoker or an administrator of the owning tenant can end a break-glass crossing", "NOT_CROSSING_OWNER")
+		return false
+	}
+	return true
 }

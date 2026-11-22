@@ -543,9 +543,8 @@ type ApproveCliLoginResponse struct {
 //
 //architecture:allow-unscoped-tenant-read -- authenticated but tenant-less resource; see Issue #4334 comment above
 func (s *Server) handleApproveCliLoginRequest(w http.ResponseWriter, r *http.Request) {
-	principal, ok := r.Context().Value(principalContextKey).(*Principal)
-	if !ok || principal == nil {
-		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+	principal, ok := s.requireActingPrincipal(w, r)
+	if !ok {
 		return
 	}
 	if s.secretStore == nil {
