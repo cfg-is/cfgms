@@ -1068,6 +1068,8 @@ the lease on **every** exit path, including the one where you record the step
 
 Include the sweep's headline + verdict tables in the cycle summary you return to the founder. If the sweep surfaces a "Needs founder review" Blocked anomaly (project item Blocked but GH issue closed — e.g. a founder action was completed but the project status was not advanced), flag it in the §6 (Cron PO) section of the cycle report.
 
+**Owner-run epics due an audit.** List every entry of the preflight's `epics_audit_due` (`number`, `run_id`, `run_ended_at`) in the cycle summary under the heading `Epic audit due`. Do not run the audit and do not close the epic: the main session runs `epic-completion-audit` for it (`.claude/commands/pipeline.md`, Owner-run epic audit). Never offer such an epic to the Planning Team.
+
 **Step 8 — Forward edge:**
 If active milestone >80% complete and next milestone has no epics, create a `high-priority` tracking issue requesting intent capture and add it to the project queue as Blocked.
 

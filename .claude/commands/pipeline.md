@@ -89,7 +89,7 @@ Each event justifies a **bundle** of §4 steps, not a single step. The bundles a
 | `board_up status=Fix count=<n>` | Step 5 fix cycle |
 | `board_up status=Failed count=<n>` | Step 1.5 agent cleanup, Step 6a stalled-dispatch recovery |
 | `container_exited name=<c>` | Step 1.5 agent cleanup, Step 6 dispatch |
-| `container_exited name=<c> run=<id> state=<STATE>` | An FSM run finished: `<STATE>` is its terminal state (`REPORT`, `NO_OP`, `REFUSED`, `FAILED`), `ABANDONED` (abandoned because its work finished elsewhere, or crashed past `CFGMS_FSM_CRASHED_TTL_HOURS`), or `gone` when its run dir disappeared while the run was open. Same bundle as `container_exited`; for `FAILED`, also the Step 4 pre-step (`resume_failed_session` on the WIP draft the run left). |
+| `container_exited name=<c> run=<id> state=<STATE>` | An FSM run finished: `<STATE>` is its terminal state (`REPORT`, `NO_OP`, `REFUSED`, `FAILED`), `ABANDONED` (abandoned because its work finished elsewhere, or crashed past `CFGMS_FSM_CRASHED_TTL_HOURS`), or `gone` when its run dir disappeared while the run was open. Same bundle as `container_exited`; for `FAILED`, also the Step 4 pre-step (`resume_failed_session` on the WIP draft the run left). For an epic run (`run=epic-<N>-…`) that ended in `REPORT`, also the owner-run epic audit below, for epic `<N>`. |
 | `container_stalled name=<c> age_min=<m>` | Step 6a stalled-dispatch recovery for that container |
 | `container_stalled name=<c> age_min=<m> run=<id> reason=heartbeat` | An FSM run's heartbeat went stale (hung) or its supervisor is gone without finishing (crashed). Step 6a: resume the run if the preflight's `fsm_recommendations` lists it with `action: resume`; a hung run (still in `fsm_runs.in_flight`) is left alone. Never re-dispatch its story. |
 | `stop reason=drained cycles=<n>` | Report to the founder. Do **not** re-arm. |
@@ -97,6 +97,30 @@ Each event justifies a **bundle** of §4 steps, not a single step. The bundles a
 Every bundle runs under the §4.-1 distributed leases exactly as a full cycle does, and the host resource-admission gate still governs every launch. Dispatch remains blocked whenever the preflight reports `code_health.ok == false`.
 
 **`checks_red` does not bypass the fix-round cap.** Step 5 dispatches a fix only for stories the board holds at status `Fix`. A round-2 acceptance failure sets the story to `Blocked`, and Step 5 skips `Blocked` items — so a PR that has already burned its one fix attempt stays parked for a human, no matter how many times its checks go red. The round is owned by the acceptance reviewer and counted from `<!-- cfgms-acceptance-review -->` comments on the PR, never from the board status.
+
+### Owner-run epic audit
+
+An owner-run epic has no sub-issues, so the pipeline sweep's epic review skips it (it buckets `total == 0` as "Not decomposed"). The epic is closed by the epic audit, and the **main session** starts it: the `po` subagent has no `Workflow` tool. This section is the instruction to run it.
+
+**When:** for each epic `<N>` in either source:
+- a `container_exited … run=epic-<N>-… state=REPORT` event;
+- the preflight's `epics_audit_due[]` (entries `{number, run_id, run_ended_at}`). The `po` cycle summary lists them; read it after every `full_cycle`. This catches a run that ended while the watcher was down.
+
+A run that ended in `FAILED`, `REFUSED`, `ABANDONED` or `gone` starts no audit.
+
+**Skip** the epic when it is closed, or when it already has a comment that contains `<!-- cfgms-owner-epic-audit run=<run_id>` for this run. `epics_audit_due` has no memory of a finished audit; that marker is the memory.
+
+**Run** one audit per epic, with `args` as an object (a string is ignored, and the workflow then audits every open epic in report-only mode):
+
+```
+Workflow({ name: "epic-completion-audit", args: { epic: <N>, close: true } })
+```
+
+**Then:**
+- **COMPLETE:** the workflow posts the closeout comment and closes the epic. Post the marker comment `<!-- cfgms-owner-epic-audit run=<run_id> verdict=COMPLETE -->`, then tell the founder in one line.
+- **INCOMPLETE:** the workflow posts nothing. Post a comment on the epic that starts with `<!-- cfgms-owner-epic-audit run=<run_id> verdict=INCOMPLETE -->` and lists the audit's gaps. Leave the epic open, and report the gaps to the founder. Do not dispatch remediation and do not decompose the epic: the founder decides the next step.
+
+An epic stays in `epics_audit_due` only while its run dir is kept (24 hours after `REPORT` by default), and only while no unexpired `epic-<N>` lease holds it. Run the audit inside that window. If the GitHub GraphQL limit is spent, post the comment and close the epic through REST (`gh api repos/cfg-is/cfgms/issues/<N>/comments -F body=@<file>`, then `gh api -X PATCH repos/cfg-is/cfgms/issues/<N> -f state=closed -f state_reason=completed`).
 
 ### Reporting each cycle back
 
