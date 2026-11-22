@@ -369,6 +369,7 @@ func (c *countingHook) OnConnect(context.Context, string) error {
 // signing version for the connection (waiting, bounded, for its declaration).
 type signingProbeHook struct {
 	runs      hookRuns
+	returned  hookRuns // when the publish came back, after any wait for the declaration
 	publisher atomic.Pointer[commands.Publisher]
 }
 
@@ -379,6 +380,7 @@ func (s *signingProbeHook) OnConnect(ctx context.Context, stewardID string) erro
 		return nil
 	}
 	_, err := pub.PublishCommand(ctx, stewardID, controlplaneTypes.CommandSyncConfig, nil)
+	s.returned.record()
 	return err
 }
 
@@ -425,10 +427,12 @@ func (c *lateChain) setPublisher(p *commands.Publisher) {
 
 // lateHook lets the provider be constructed before the chain exists.
 type lateHook struct {
-	chain atomic.Pointer[service.CompositeOnConnectHook]
+	chain   atomic.Pointer[service.CompositeOnConnectHook]
+	entered hookRuns // when the provider started the chain, before any hook in it ran
 }
 
 func (l *lateHook) OnConnect(ctx context.Context, stewardID string) error {
+	l.entered.record()
 	if c := l.chain.Load(); c != nil {
 		return c.OnConnect(ctx, stewardID)
 	}
@@ -564,17 +568,33 @@ func TestLateDeclarationReplacesFloor(t *testing.T) {
 	assert.Equal(t, int32(3), ran.Load())
 }
 
-// TestSilentStewardFirstSignedCommandWaitsOnlyTheGrace: a steward that never
-// declares gets its first signed on-connect command no later than the grace plus
-// a small bound, and the hooks that do not sign are not held up by that wait.
-func TestSilentStewardFirstSignedCommandWaitsOnlyTheGrace(t *testing.T) {
-	t.Parallel()
-	const (
-		stewardID = "steward-late-silent"
-		grace     = 800 * time.Millisecond
-		wait      = 500 * time.Millisecond
-		bound     = 700 * time.Millisecond
-	)
+// silentRun is what one silent-steward connection showed: the connection, the
+// chain whose hooks recorded their runs, and the first signed command.
+type silentRun struct {
+	conn     *registry.StewardConnection
+	chain    *lateChain
+	command  *controlplaneTypes.SignedCommand
+	received time.Time
+}
+
+const (
+	silentGrace = 800 * time.Millisecond
+	silentWait  = 500 * time.Millisecond
+)
+
+// runSilentSteward connects a steward that never declares capabilities to a
+// controller whose on-connect chain is the one build returns, and waits for its
+// first signed command.
+//
+// Two reference points are deliberately not used for the hooks' delay. Not the
+// time before the connect: TLS and gRPC setup and the poll for registration vary
+// with the load on the runner. And not conn.ConnectedAt: it is stamped when the
+// connection is built, before the durable capability-record reset and the
+// registry insert, so those two land in it before the chain starts (measured up
+// to several hundred ms on a loaded runner). The hooks' order is asserted as an
+// order (see assertNonSigningBeforeSigning), which neither can disturb.
+func runSilentSteward(t *testing.T, stewardID string, build func(*lateChain) *service.CompositeOnConnectHook) silentRun {
+	t.Helper()
 	sm := pkgtesting.SetupTestStorage(t)
 	stewardStore, commandStore := sm.GetStewardStore(), sm.GetCommandStore()
 	require.NoError(t, stewardStore.RegisterSteward(context.Background(), &business.StewardRecord{
@@ -585,10 +605,10 @@ func TestSilentStewardFirstSignedCommandWaitsOnlyTheGrace(t *testing.T) {
 	chain := newLateChain(commandStore, stewardStore)
 	entry := &lateHook{}
 	f := newCapFixture(t, stewardID, stewardStore, capConfig{
-		grace: grace,
+		grace: silentGrace,
 		hook:  func(*service.ControllerService) grpcCP.StewardOnConnectHook { return entry },
 	})
-	resolver := commands.NewCapabilityResolver(f.reg, stewardStore, logging.NewNoopLogger(), commands.WithCapabilityResolveWait(wait))
+	resolver := commands.NewCapabilityResolver(f.reg, stewardStore, logging.NewNoopLogger(), commands.WithCapabilityResolveWait(silentWait))
 	signer, _ := lateTestSigner(t)
 	publisher, err := commands.New(&commands.Config{
 		ControlPlane: f.server, Signer: signer, TermSource: fixedTerm(7),
@@ -596,11 +616,12 @@ func TestSilentStewardFirstSignedCommandWaitsOnlyTheGrace(t *testing.T) {
 	})
 	require.NoError(t, err)
 	chain.setPublisher(publisher)
-	entry.chain.Store(service.NewOrderedCompositeOnConnectHook(logging.NewNoopLogger(), chain.hooks...))
+	entry.chain.Store(build(chain))
 
 	received := make(chan time.Time, 8)
 	start := time.Now()
-	client, _ := f.connect(t, false)
+	client, conn := f.connect(t, false)
+	connectDone := time.Since(start)
 	var first atomic.Pointer[controlplaneTypes.SignedCommand]
 	require.NoError(t, client.SubscribeCommands(context.Background(), stewardID,
 		func(_ context.Context, sc *controlplaneTypes.SignedCommand) error {
@@ -609,20 +630,12 @@ func TestSilentStewardFirstSignedCommandWaitsOnlyTheGrace(t *testing.T) {
 			return nil
 		}))
 
+	var at time.Time
 	select {
-	case at := <-received:
-		elapsed := at.Sub(start)
-		assert.LessOrEqual(t, elapsed, grace+bound, "the first signed command is produced by the grace plus a small bound")
-		assert.GreaterOrEqual(t, elapsed, wait-100*time.Millisecond, "it did wait for the declaration first")
-	case <-time.After(grace + 5*time.Second):
+	case at = <-received:
+	case <-time.After(silentGrace + 5*time.Second):
 		t.Fatal("no signed command reached the silent steward")
 	}
-	sc := first.Load()
-	require.NotNil(t, sc)
-	assert.Zero(t, sc.Command.SigningPayloadVersion, "a silent steward is signed for at the floor (v1)")
-	assert.NotNil(t, sc.Signature)
-
-	// The hooks that do not sign ran at once, not behind the wait.
 	require.Eventually(t, func() bool {
 		for _, h := range chain.nonSigning {
 			if h.runs.count() == 0 {
@@ -631,8 +644,118 @@ func TestSilentStewardFirstSignedCommandWaitsOnlyTheGrace(t *testing.T) {
 		}
 		return true
 	}, 5*time.Second, 5*time.Millisecond)
+	sc := first.Load()
+	require.NotNil(t, sc)
+
+	// Evidence for the reference point: when the hooks started, from each of the
+	// candidate instants.
+	t.Logf("connect returned %s after start; ConnectedAt %s after start; chain entered %s after ConnectedAt",
+		connectDone, conn.ConnectedAt.Sub(start), entry.entered.first().Sub(conn.ConnectedAt))
 	for slot, h := range chain.nonSigning {
-		assert.Less(t, h.runs.first().Sub(start), wait, "%s was not delayed by the signing hooks' wait", slot)
+		t.Logf("%s first ran %s after the chain was entered, %s after ConnectedAt, %s after start",
+			slot, h.runs.first().Sub(entry.entered.first()), h.runs.first().Sub(conn.ConnectedAt), h.runs.first().Sub(start))
+	}
+	require.Equal(t, 1, entry.entered.count(), "the provider starts the chain once")
+	return silentRun{conn: conn, chain: chain, command: sc, received: at}
+}
+
+// TestSilentStewardFirstSignedCommandWaitsOnlyTheGrace: a steward that never
+// declares gets its first signed on-connect command no later than the grace plus
+// a small bound, and the hooks that do not sign are not held up by that wait.
+func TestSilentStewardFirstSignedCommandWaitsOnlyTheGrace(t *testing.T) {
+	t.Parallel()
+	const bound = 700 * time.Millisecond
+	run := runSilentSteward(t, "steward-late-silent", func(c *lateChain) *service.CompositeOnConnectHook {
+		return service.NewOrderedCompositeOnConnectHook(logging.NewNoopLogger(), c.hooks...)
+	})
+
+	// The resolver counts its wait from the connection's start (ConnectedAt).
+	elapsed := run.received.Sub(run.conn.ConnectedAt)
+	assert.LessOrEqual(t, elapsed, silentGrace+bound, "the first signed command is produced by the grace plus a small bound")
+	assert.GreaterOrEqual(t, elapsed, silentWait-100*time.Millisecond, "it did wait for the declaration first")
+	assert.Zero(t, run.command.Command.SigningPayloadVersion, "a silent steward is signed for at the floor (v1)")
+	assert.NotNil(t, run.command.Signature)
+
+	// The hooks that do not sign ran at once, not behind the wait.
+	assert.Empty(t, slotsRunBehindSigning(t, run.chain), "no hook that does not sign ran behind a signing hook's wait")
+}
+
+// earliest returns the earliest of the given times that is set.
+func earliest(times ...time.Time) time.Time {
+	var out time.Time
+	for _, at := range times {
+		if !at.IsZero() && (out.IsZero() || at.Before(out)) {
+			out = at
+		}
+	}
+	return out
+}
+
+// slotsRunBehindSigning names the hooks that do not sign and first ran after the
+// first signing hook had started, so behind a signing hook's wait for the
+// declaration. It is an order, not a delay from a clock reading taken before the
+// chain started, so connect and storage latency before the chain cannot move it.
+func slotsRunBehindSigning(t *testing.T, chain *lateChain) []service.ConnectHookSlot {
+	t.Helper()
+	var starts []time.Time
+	for _, h := range chain.signing {
+		starts = append(starts, h.runs.first())
+	}
+	firstSigning := earliest(starts...)
+	require.False(t, firstSigning.IsZero(), "a signing hook ran")
+	var behind []service.ConnectHookSlot
+	for slot, h := range chain.nonSigning {
+		if h.runs.first().After(firstSigning) {
+			behind = append(behind, slot)
+		}
+	}
+	return behind
+}
+
+// signingReturned is when the first signing hook's publish came back.
+func signingReturned(chain *lateChain) time.Time {
+	var returns []time.Time
+	for _, h := range chain.signing {
+		returns = append(returns, h.returned.first())
+	}
+	return earliest(returns...)
+}
+
+// TestSilentStewardOrderCheckSeesNonSigningHooksBehindTheWait proves the order
+// check in the test above can fail: the same chain with the non-signing hooks put
+// after the signing ones runs every one of them behind the signing hooks, and
+// only once the first signing publish has returned from its wait.
+func TestSilentStewardOrderCheckSeesNonSigningHooksBehindTheWait(t *testing.T) {
+	t.Parallel()
+	run := runSilentSteward(t, "steward-late-silent-misordered", func(c *lateChain) *service.CompositeOnConnectHook {
+		var signing, nonSigning []service.SlottedConnectHook
+		for _, h := range c.hooks {
+			if _, ok := c.nonSigning[h.Slot]; ok {
+				nonSigning = append(nonSigning, h)
+			} else {
+				signing = append(signing, h)
+			}
+		}
+		// The drain hook is last in the ordered chain; the misordering puts the
+		// non-signing hooks after every signing hook, drain included.
+		hooks := make([]service.SlottedConnectHook, 0, len(c.hooks))
+		hooks = append(hooks, signing...)
+		hooks = append(hooks, nonSigning...)
+		// NewCompositeOnConnectHook takes its hooks one by one, so the chain is
+		// folded from the back: each composite runs its hook, then the rest.
+		cur := service.NewCompositeOnConnectHook(logging.NewNoopLogger(), hooks[len(hooks)-1].Hook)
+		for i := len(hooks) - 2; i >= 0; i-- {
+			cur = service.NewCompositeOnConnectHook(logging.NewNoopLogger(), hooks[i].Hook, cur)
+		}
+		return cur
+	})
+
+	assert.Len(t, slotsRunBehindSigning(t, run.chain), len(run.chain.nonSigning),
+		"every hook that does not sign ran after a signing hook had started")
+	returned := signingReturned(run.chain)
+	require.False(t, returned.IsZero(), "a signing hook's publish returned")
+	for slot, h := range run.chain.nonSigning {
+		assert.False(t, h.runs.first().Before(returned), "%s ran before the signing hooks' wait was over", slot)
 	}
 }
 
