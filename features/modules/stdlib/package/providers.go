@@ -21,6 +21,10 @@ const metaDefaultsName = "@defaults"
 type providerEntry struct {
 	probe       func(ctx context.Context) bool
 	constructor func() PackageManager
+	// diagnose, when set, returns the reason a failed probe failed. It is
+	// only called after probe returned false, so the selection error can name
+	// the cause instead of just listing the providers tried.
+	diagnose func(ctx context.Context) error
 }
 
 // defaultProviderRegistry is the built-in set of providers the module can
@@ -33,7 +37,7 @@ var defaultProviderRegistry = map[string]providerEntry{
 	"dnf":    {probe: cmdProbe("dnf"), constructor: newDnfManager},
 	"yum":    {probe: cmdProbe("yum"), constructor: newYumManager},
 	"pacman": {probe: cmdProbe("pacman"), constructor: newPacmanManager},
-	"brew":   {probe: cmdProbe("brew"), constructor: newHomebrewManager},
+	"brew":   {probe: brewProbe, constructor: newHomebrewManager, diagnose: brewCheck},
 }
 
 // cmdProbe returns an availability probe that succeeds when `<cmdName>
@@ -43,6 +47,12 @@ func cmdProbe(cmdName string) func(ctx context.Context) bool {
 		_, err := exec.CommandContext(ctx, cmdName, "--version").Output()
 		return err == nil
 	}
+}
+
+// brewProbe reports whether Homebrew is installed at its fixed path and runs
+// `--version` as the prefix owner. It never resolves brew through PATH.
+func brewProbe(ctx context.Context) bool {
+	return brewCheck(ctx) == nil
 }
 
 // wingetProbe reports whether a working winget.exe can be resolved, either
@@ -121,6 +131,7 @@ func (m *PackageModule) selectManager(ctx context.Context, providers []string) (
 		}
 	}
 
+	var causes []string
 	for _, name := range providers {
 		if name == "choco" {
 			mgr, ok, err := m.chocoAvailable(ctx)
@@ -135,9 +146,31 @@ func (m *PackageModule) selectManager(ctx context.Context, providers []string) (
 		if reg[name].probe(ctx) {
 			return reg[name].constructor(), name, nil
 		}
+		causes = appendProbeCause(ctx, causes, name, reg[name])
 	}
 
-	return nil, "", fmt.Errorf("no available package provider among %v", providers)
+	return nil, "", noProviderError(providers, causes)
+}
+
+// appendProbeCause adds the reason a failed probe failed to causes, when the
+// provider can diagnose it.
+func appendProbeCause(ctx context.Context, causes []string, name string, entry providerEntry) []string {
+	if entry.diagnose == nil {
+		return causes
+	}
+	if err := entry.diagnose(ctx); err != nil {
+		causes = append(causes, fmt.Sprintf("%s: %v", name, err))
+	}
+	return causes
+}
+
+// noProviderError builds the "no available provider" error, naming the
+// diagnosed causes when there are any.
+func noProviderError(providers, causes []string) error {
+	if len(causes) > 0 {
+		return fmt.Errorf("no available package provider among %v (%s)", providers, strings.Join(causes, "; "))
+	}
+	return fmt.Errorf("no available package provider among %v", providers)
 }
 
 // chocoAvailable determines whether chocolatey can satisfy this selection:

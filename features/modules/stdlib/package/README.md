@@ -72,6 +72,20 @@ never falls back to a provider outside the effective allowlist.
 | macOS | `brew` | — |
 | Windows | `winget` | `choco` (explicit opt-in) |
 
+### macOS Homebrew requirement
+
+Homebrew refuses to run as root, and the steward runs as root. The `brew`
+provider therefore requires Homebrew to be installed at its fixed location for
+the architecture (`/opt/homebrew/bin/brew` on Apple silicon,
+`/usr/local/bin/brew` on Intel; `PATH` is never consulted) and runs every
+`brew` command as the user that owns the Homebrew repository directory
+(`/opt/homebrew`, or `/usr/local/Homebrew` on Intel), with that user's `HOME`.
+The module refuses to run `brew` when the resolved binary is world-writable or
+owned by neither root nor that user. If Homebrew is not installed, the
+repository directory cannot be read, or it is owned by root, the operation fails
+with an error naming the cause; it never falls back to running `brew` as root.
+The module does not install Homebrew.
+
 Installing a different provider is not an automatic substitute for the one
 allowed by policy. If none of the allowed providers is usable, the operation
 fails with the attempted list.

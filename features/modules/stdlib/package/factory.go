@@ -18,48 +18,58 @@ import (
 func NewPackageManager(ctx context.Context) (PackageManager, error) {
 	switch runtime.GOOS {
 	case "windows":
-		// resolveWinget checks the PATH app-execution alias (interactive
-		// users) then the packaged WindowsApps binary for SYSTEM/service
-		// contexts (the steward runs as LocalSystem; CI runner services run
-		// as NETWORK SERVICE, neither has a user profile / alias) — a
-		// declared path to a Microsoft-signed binary (predictable admin
-		// tooling per the threat model).
-		if bin, ok := resolveWinget(ctx); ok {
-			return newWingetManagerWithPath(bin), nil
-		}
-		// Check if chocolatey is available
-		// Run only the verified absolute path, never a PATH-resolved name.
-		if chocoProbe(ctx) {
-			return newChocolateyManager(), nil
-		}
-		return nil, fmt.Errorf("no supported package manager found on Windows")
-
+		return newWindowsPackageManager(ctx)
 	case "darwin":
-		// Check if Homebrew is available
-		if _, err := exec.CommandContext(ctx, "brew", "--version").Output(); err == nil {
-			return newHomebrewManager(), nil
-		}
-		return nil, fmt.Errorf("homebrew not found on macOS")
-
+		return newDarwinPackageManager(ctx)
 	case "linux":
-		// Check for Linux package managers in order of preference
-		if _, err := exec.CommandContext(ctx, "apt-get", "--version").Output(); err == nil {
-			return newAptManager(), nil
-		}
-		if _, err := exec.CommandContext(ctx, "dnf", "--version").Output(); err == nil {
-			return newDnfManager(), nil
-		}
-		if _, err := exec.CommandContext(ctx, "yum", "--version").Output(); err == nil {
-			return newYumManager(), nil
-		}
-		if _, err := exec.CommandContext(ctx, "pacman", "--version").Output(); err == nil {
-			return newPacmanManager(), nil
-		}
-		return nil, fmt.Errorf("no supported package manager found on Linux")
-
+		return newLinuxPackageManager(ctx)
 	default:
 		return nil, fmt.Errorf("unsupported platform: %s", runtime.GOOS)
 	}
+}
+
+func newWindowsPackageManager(ctx context.Context) (PackageManager, error) {
+	// resolveWinget checks the PATH app-execution alias (interactive
+	// users) then the packaged WindowsApps binary for SYSTEM/service
+	// contexts (the steward runs as LocalSystem; CI runner services run
+	// as NETWORK SERVICE, neither has a user profile / alias) — a
+	// declared path to a Microsoft-signed binary (predictable admin
+	// tooling per the threat model).
+	if bin, ok := resolveWinget(ctx); ok {
+		return newWingetManagerWithPath(bin), nil
+	}
+	// Check if chocolatey is available
+	// Run only the verified absolute path, never a PATH-resolved name.
+	if chocoProbe(ctx) {
+		return newChocolateyManager(), nil
+	}
+	return nil, fmt.Errorf("no supported package manager found on Windows")
+}
+
+func newDarwinPackageManager(ctx context.Context) (PackageManager, error) {
+	// Homebrew is located by its fixed path and run as the prefix owner,
+	// never through PATH and never as root.
+	if err := brewCheck(ctx); err != nil {
+		return nil, fmt.Errorf("homebrew not usable on macOS: %w", err)
+	}
+	return newHomebrewManager(), nil
+}
+
+func newLinuxPackageManager(ctx context.Context) (PackageManager, error) {
+	// Check for Linux package managers in order of preference
+	if _, err := exec.CommandContext(ctx, "apt-get", "--version").Output(); err == nil {
+		return newAptManager(), nil
+	}
+	if _, err := exec.CommandContext(ctx, "dnf", "--version").Output(); err == nil {
+		return newDnfManager(), nil
+	}
+	if _, err := exec.CommandContext(ctx, "yum", "--version").Output(); err == nil {
+		return newYumManager(), nil
+	}
+	if _, err := exec.CommandContext(ctx, "pacman", "--version").Output(); err == nil {
+		return newPacmanManager(), nil
+	}
+	return nil, fmt.Errorf("no supported package manager found on Linux")
 }
 
 // resolveWinget locates a working winget.exe invocation path: the bare
