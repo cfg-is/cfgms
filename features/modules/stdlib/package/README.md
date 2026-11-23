@@ -55,6 +55,31 @@ installs a different version. `apt` install and remove run with
 `DEBIAN_FRONTEND=noninteractive` (set on those commands only), so a debconf
 question cannot block until the operation deadline.
 
+#### Pinning to an older version (downgrade)
+
+A declared exact `version` older than the installed version downgrades that
+package, so a rollback pin converges. A version equal to or newer than the
+installed one keeps the normal install, and `version: latest` never downgrades.
+If the installed version cannot be read or compared, the module runs the normal
+install.
+
+| Provider | Downgrade behavior |
+|---|---|
+| `apt` | Runs `apt-get install -y --allow-downgrades -- name=version`. No other `--allow-*` option is added, so held and essential packages are never overridden. The module first runs a dry run (`apt-get install -s`) and proceeds only if apt would change no package other than the declared one. Versions are compared with Debian ordering (epoch, upstream, revision, `~` sorts first). |
+| `dnf`, `yum` | Runs `downgrade -y -- name-version` instead of `install`. Only the rpm `%{VERSION}` is compared (rpm version ordering); the release is never compared, so a declared version equal to the installed `%{VERSION}` is never a downgrade. The module does not verify beforehand that no other package changes: the resolver may change dependencies. |
+
+**Lockstep dependencies (apt).** If the older version depends on an exact
+version of another package (for example `jq` requires `libjq1` at the same
+version), apt would have to change that package too. The module does not do
+that. `Install` returns an error that names the provider (`apt`) and the
+package, says the dependency must be declared at a matching version, and
+changes nothing. Declare the dependency with its own pinned `version` in the
+policy, then apply again. If the dry run itself fails (for example unmet
+dependencies), the error carries apt's output and the same hint.
+
+The module does not hold or mark the package, so a later `version: latest`
+declaration or a system upgrade can move it forward again.
+
 `state: absent` removes the package through the selected provider; it does not
 require a version. Provider/version configuration also affects observed state
 and comparison. The steward's convergence cycle determines when Set is needed;

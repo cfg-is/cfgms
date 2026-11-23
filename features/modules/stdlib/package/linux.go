@@ -4,6 +4,7 @@ package package_module
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -41,20 +42,117 @@ func installCoordinate(name, version, sep string) string {
 
 // aptInstallArgs builds the apt-get argv for installing name at version.
 // The coordinate follows "--" as a single element: "name" or "name=version".
-func aptInstallArgs(name, version string) []string {
-	return []string{"install", "-y", "--", installCoordinate(name, version, "=")}
+// When downgrade is true, --allow-downgrades is added and no other --allow-*
+// option: held packages and essential packages are never touched.
+func aptInstallArgs(name, version string, downgrade bool) []string {
+	args := []string{"install", "-y"}
+	if downgrade {
+		args = append(args, "--allow-downgrades")
+	}
+	return append(args, "--", installCoordinate(name, version, "="))
+}
+
+// aptSimulateArgs builds the apt-get argv for a dry run (-s) of the downgrade
+// that aptInstallArgs(name, version, true) would perform.
+func aptSimulateArgs(name, version string) []string {
+	return []string{"install", "-s", "-y", "--allow-downgrades", "--", installCoordinate(name, version, "=")}
 }
 
 // dnfInstallArgs builds the dnf argv for installing name at version
-// ("name" or "name-version", one element after "--").
-func dnfInstallArgs(name, version string) []string {
-	return []string{"install", "-y", "--", installCoordinate(name, version, "-")}
+// ("name" or "name-version", one element after "--"). When downgrade is true
+// the verb is "downgrade", which dnf requires to replace a newer installed
+// version.
+func dnfInstallArgs(name, version string, downgrade bool) []string {
+	return []string{rpmInstallVerb(downgrade), "-y", "--", installCoordinate(name, version, "-")}
 }
 
 // yumInstallArgs builds the yum argv for installing name at version
-// ("name" or "name-version", one element after "--").
-func yumInstallArgs(name, version string) []string {
-	return []string{"install", "-y", "--", installCoordinate(name, version, "-")}
+// ("name" or "name-version", one element after "--"). When downgrade is true
+// the verb is "downgrade".
+func yumInstallArgs(name, version string, downgrade bool) []string {
+	return []string{rpmInstallVerb(downgrade), "-y", "--", installCoordinate(name, version, "-")}
+}
+
+func rpmInstallVerb(downgrade bool) string {
+	if downgrade {
+		return "downgrade"
+	}
+	return "install"
+}
+
+// downgradeNeeded reports whether declared is an exact version older than the
+// installed one. "latest", an absent package (installedErr != nil), an equal
+// or older installed version, and an unparseable version all return false,
+// which keeps the plain install behaviour.
+func downgradeNeeded(installed string, installedErr error, declared string,
+	compare func(installed, declared string) (int, error)) bool {
+	if declared == "latest" || installedErr != nil {
+		return false
+	}
+	cmp, err := compare(installed, declared)
+	return err == nil && cmp > 0
+}
+
+// isDowngrade queries the manager's installed version and applies
+// downgradeNeeded. A failed query keeps the plain install behaviour.
+func isDowngrade(ctx context.Context, mgr PackageManager, name, declared string,
+	compare func(installed, declared string) (int, error)) bool {
+	if declared == "latest" {
+		return false
+	}
+	installed, err := mgr.GetInstalledVersion(ctx, name)
+	return downgradeNeeded(installed, err, declared, compare)
+}
+
+// installRPM installs name at version with the fixed rpm-family executable exe
+// (dnf or yum). Only %{VERSION} is compared to decide on the downgrade verb;
+// the release is never compared.
+func installRPM(ctx context.Context, mgr PackageManager, exe string,
+	buildArgs func(name, version string, downgrade bool) []string, name, version string) error {
+	downgrade := isDowngrade(ctx, mgr, name, version, compareRPMVersions)
+	// #nosec G204 -- exe is the fixed "dnf" or "yum" literal from the calling
+	// manager; the validated name-version coordinate follows "--" as one argv
+	// element (install or downgrade verb), without shell interpretation.
+	cmd := exec.CommandContext(ctx, exe, buildArgs(name, version, downgrade)...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
+	}
+	return nil
+}
+
+// ErrDowngradeNeedsDependency is returned when an apt downgrade of the declared
+// package would also change another package, or apt cannot resolve it alone.
+var ErrDowngradeNeedsDependency = errors.New("downgrade requires a change to another package")
+
+// checkAptDowngradeSimulation parses the output of an `apt-get -s` run and
+// returns an error wrapping ErrDowngradeNeedsDependency when any Inst, Remv or
+// Conf line names a package other than name.
+func checkAptDowngradeSimulation(name, version, output string) error {
+	var others []string
+	seen := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "Inst", "Remv", "Conf":
+		default:
+			continue
+		}
+		if fields[1] == name || seen[fields[1]] {
+			continue
+		}
+		seen[fields[1]] = true
+		others = append(others, fields[1])
+	}
+	if len(others) > 0 {
+		return fmt.Errorf("apt: downgrading package %s to %s would also change %s: %w; "+
+			"declare the dependency at a matching version",
+			name, version, strings.Join(others, ", "), ErrDowngradeNeedsDependency)
+	}
+	return nil
 }
 
 // aptCommand builds an apt-get command that never blocks on a debconf prompt.
@@ -76,9 +174,25 @@ func newAptManager() PackageManager {
 }
 
 func (m *aptManager) Install(ctx context.Context, name, version string) error {
+	downgrade := isDowngrade(ctx, m, name, version, compareDebianVersions)
+	if downgrade {
+		// Dry run first: apt must change only the declared package. A
+		// lockstep dependency would need its own declared version.
+		// #nosec G204 -- fixed apt-get executable; the validated name=version
+		// coordinate follows "--" as one argv element, with no shell.
+		sim := aptCommand(ctx, aptSimulateArgs(name, version)...)
+		out, err := sim.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("apt: cannot downgrade package %s to %s; declare the dependency at a matching version: %w\nOutput: %s",
+				name, version, err, string(out))
+		}
+		if err := checkAptDowngradeSimulation(name, version, string(out)); err != nil {
+			return err
+		}
+	}
 	// Name and version are validated before dispatch; "--" terminates options,
 	// and name=version is one argv element passed without a shell.
-	cmd := aptCommand(ctx, aptInstallArgs(name, version)...)
+	cmd := aptCommand(ctx, aptInstallArgs(name, version, downgrade)...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
@@ -148,14 +262,7 @@ func newDnfManager() PackageManager {
 }
 
 func (m *dnfManager) Install(ctx context.Context, name, version string) error {
-	// #nosec G204 -- the validated name-version coordinate follows "--" as one
-	// argv element to the fixed dnf executable without shell interpretation.
-	cmd := exec.CommandContext(ctx, "dnf", dnfInstallArgs(name, version)...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
-	}
-	return nil
+	return installRPM(ctx, m, "dnf", dnfInstallArgs, name, version)
 }
 
 func (m *dnfManager) Remove(ctx context.Context, name string) error {
@@ -220,14 +327,7 @@ func newYumManager() PackageManager {
 }
 
 func (m *yumManager) Install(ctx context.Context, name, version string) error {
-	// #nosec G204 -- the validated name-version coordinate follows "--" as one
-	// argv element to the fixed yum executable without shell interpretation.
-	cmd := exec.CommandContext(ctx, "yum", yumInstallArgs(name, version)...)
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
-	}
-	return nil
+	return installRPM(ctx, m, "yum", yumInstallArgs, name, version)
 }
 
 func (m *yumManager) Remove(ctx context.Context, name string) error {
