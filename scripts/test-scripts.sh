@@ -2722,6 +2722,81 @@ test_build_gate_requires_macos_test_compile() {
     log_pass "build-gate-pr-stub needs macos-test-compile and checks its result; the job runs make test-macos-compile on Linux"
 }
 
+# The live root-to-owner job (Issue #6464) builds the brewlive test binary and
+# runs it under sudo on a hosted macOS runner. It is judged by its own
+# macos-gate-rule.sh call, never by the unit-leg loop or the docs-only generic
+# loop, and it runs on exactly the macOS-closure trigger.
+test_build_gate_requires_macos_brew_live() {
+    log_test "Testing build-gate-pr-stub needs macos-brew-live and judges it with macos-gate-rule.sh..."
+
+    local wf=.github/workflows/cross-platform-build-pr.yml
+    local gate job
+    gate=$(awk '/^  build-gate-pr-stub:/ { on = 1 } on' "$wf")
+    job=$(awk '$0 == "  macos-brew-live:" { on = 1; next } on && /^  [a-z0-9-]+:$/ { exit } on' "$wf")
+    if [[ -z "$gate" || -z "$job" ]]; then
+        log_fail "build-gate-pr-stub or macos-brew-live not found in $wf"
+        return
+    fi
+
+    if ! grep -qxF '      - macos-brew-live' <<< "$gate"; then
+        log_fail "build-gate-pr-stub does not list macos-brew-live in needs:"
+        return
+    fi
+    if ! grep -qF 'MACOS_BREW_LIVE_RESULT: ${{ needs.macos-brew-live.result }}' <<< "$gate"; then
+        log_fail "build-gate-pr-stub does not pass needs.macos-brew-live.result as MACOS_BREW_LIVE_RESULT"
+        return
+    fi
+    if ! grep -qE '^[[:space:]]*bash scripts/macos-gate-rule\.sh "\$CHANGES_RESULT" "\$MACOS_CHANGES" "\$MACOS_BREW_LIVE_RESULT"' <<< "$gate"; then
+        log_fail "build-gate-pr-stub does not pass MACOS_BREW_LIVE_RESULT to macos-gate-rule.sh with the changes result and macos output"
+        return
+    fi
+    if ! grep -qE 'echo "\| .* \| \$MACOS_BREW_LIVE_RESULT \|"' <<< "$gate"; then
+        log_fail "build-gate-pr-stub summary has no row for MACOS_BREW_LIVE_RESULT"
+        return
+    fi
+    # Not in any `for result in` loop: the docs-only generic loop would accept
+    # skipped on any docs-only PR, and the unit-leg loop is a different call.
+    if grep -E '^[[:space:]]*for result in ' <<< "$gate" | grep -qF 'MACOS_BREW_LIVE_RESULT'; then
+        log_fail "MACOS_BREW_LIVE_RESULT is in a for-result loop of build-gate-pr-stub"
+        return
+    fi
+    if ! grep -qE "^    if: always\(\) && needs\.changes\.outputs\.macos == 'true'\$" <<< "$job"; then
+        log_fail "macos-brew-live if: is not exactly: always() && needs.changes.outputs.macos == 'true'"
+        return
+    fi
+    if ! grep -qE '^    runs-on: macos-latest$' <<< "$job"; then
+        log_fail "macos-brew-live does not run on macos-latest"
+        return
+    fi
+    if ! grep -qE '^    needs: changes$' <<< "$job"; then
+        log_fail "macos-brew-live does not need changes"
+        return
+    fi
+    if ! grep -qE '^    timeout-minutes: 15$' <<< "$job"; then
+        log_fail "macos-brew-live timeout-minutes is not 15"
+        return
+    fi
+    if ! grep -qE '^      contents: read$' <<< "$job"; then
+        log_fail "macos-brew-live does not set permissions: contents: read"
+        return
+    fi
+    if ! grep -qF 'go test -c -tags brewlive -o "$RUNNER_TEMP/brewlive.test" ./features/modules/stdlib/package' <<< "$job"; then
+        log_fail "macos-brew-live does not build the brewlive test binary as the runner user"
+        return
+    fi
+    if ! grep -qF "sudo \"\$RUNNER_TEMP/brewlive.test\" -test.run '^TestBrewLiveRunsAsPrefixOwner\$' -test.v -test.timeout 6m" <<< "$job"; then
+        log_fail "macos-brew-live does not run only TestBrewLiveRunsAsPrefixOwner from the built binary under sudo"
+        return
+    fi
+    # The only sudo is the one test binary; go itself never runs as root.
+    if [[ $(grep -c 'sudo' <<< "$job") -ne 1 ]]; then
+        log_fail "macos-brew-live uses sudo other than for the built test binary"
+        return
+    fi
+
+    log_pass "build-gate-pr-stub needs macos-brew-live, passes its result to macos-gate-rule.sh in its own call, and the job runs only the live test under sudo"
+}
+
 # scripts/macos-pr-filter.sh against the real repository (Issue #5974): the
 # eight macOS legs may be skipped only when no changed file is in the closure.
 test_macos_pr_filter() {
@@ -3931,6 +4006,7 @@ DISPATCH_TABLE=(
     "test_macos_pr_filter:core"
     "test_agent_image_filter:core"
     "test_build_gate_requires_macos_test_compile:core"
+    "test_build_gate_requires_macos_brew_live:core"
     "test_windows_steward_groups_cover_exactly_steward_and_cmd:core"
     "test_windows_cmd_steward_timeout_and_streaming:core"
     "test_macos_cmd_steward_timeout_and_streaming:core"

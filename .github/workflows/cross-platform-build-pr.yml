@@ -1242,6 +1242,58 @@ jobs:
         CFGMS_MACOS_REST_SHARDS: "2"
       run: make test-go-group-macos-rest
 
+  # Live root-to-owner check for the macOS `package` module (Issue #6464). The
+  # unit legs run as the non-root runner user, so the credential drop that makes
+  # brew run as the Homebrew prefix owner when the steward is root (#6459) would
+  # never execute. Hosted macOS runners have passwordless sudo and Homebrew at
+  # its fixed path owned by the runner user. The test binary is built as the
+  # runner user (the Go module and build caches stay runner-owned) and only that
+  # binary, restricted to one test, runs under sudo: any other test in the
+  # package would otherwise run as root. Gated like the eight unit legs.
+  macos-brew-live:
+    name: macOS Live Homebrew (root runs brew as prefix owner)
+    permissions:
+      contents: read
+    needs: changes
+    runs-on: macos-latest
+    timeout-minutes: 15
+    if: always() && needs.changes.outputs.macos == 'true'
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - name: Set up Go
+      uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
+      with:
+        go-version: ${{ env.GO_VERSION }}
+        cache: false
+
+    # Restore-only (Issue #4234), as in the unit legs above.
+    - name: Restore Go module/build cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: |
+          ~/go/pkg/mod
+          ~/.cache/go-build
+          ~/Library/Caches/go-build
+          ~\AppData\Local\go-build
+          ~\go\pkg\mod
+        key: ${{ runner.os }}-go-modules-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-modules-
+
+    - name: Download dependencies
+      run: bash scripts/go-fetch-retry.sh mod download
+
+    - name: Build the live test binary (runner user)
+      shell: bash
+      run: go test -c -tags brewlive -o "$RUNNER_TEMP/brewlive.test" ./features/modules/stdlib/package
+
+    - name: Run the live test as root
+      shell: bash
+      run: sudo "$RUNNER_TEMP/brewlive.test" -test.run '^TestBrewLiveRunsAsPrefixOwner$' -test.v -test.timeout 6m
+
   # Non-Docker e2e suite (Issue #4219). It took over production-gates.yml's
   # queue-only "Comprehensive E2E Testing" job (same command, same -run
   # filter), which #4220 then removed from the queue.
@@ -1378,6 +1430,7 @@ jobs:
       - macos-cmd-steward-4
       - macos-rest-1
       - macos-rest-2
+      - macos-brew-live
       - e2e
     runs-on: ubuntu-latest
     if: always()
@@ -1409,6 +1462,7 @@ jobs:
         MACOS_CMD_STEWARD_4_RESULT: ${{ needs.macos-cmd-steward-4.result }}
         MACOS_REST_1_RESULT: ${{ needs.macos-rest-1.result }}
         MACOS_REST_2_RESULT: ${{ needs.macos-rest-2.result }}
+        MACOS_BREW_LIVE_RESULT: ${{ needs.macos-brew-live.result }}
         E2E_RESULT: ${{ needs.e2e.result }}
         CHANGES_RESULT: ${{ needs.changes.result }}
         CODE_CHANGES: ${{ needs.changes.outputs.code }}
@@ -1437,6 +1491,7 @@ jobs:
         echo "| macOS: cmd/steward shard 4/4 | $MACOS_CMD_STEWARD_4_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: rest shard 1/2 | $MACOS_REST_1_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| macOS: rest shard 2/2 | $MACOS_REST_2_RESULT |" >> $GITHUB_STEP_SUMMARY
+        echo "| macOS: live Homebrew as root | $MACOS_BREW_LIVE_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| E2E (no Docker) | $E2E_RESULT |" >> $GITHUB_STEP_SUMMARY
         echo "| Docker Integration + Queue Re-validation | deferred to merge queue |" >> $GITHUB_STEP_SUMMARY
         echo "| Change detection (\`changes\`) | $CHANGES_RESULT (code=${CODE_CHANGES:-<unset>}, macos=${MACOS_CHANGES:-<unset>}) |" >> $GITHUB_STEP_SUMMARY
@@ -1494,6 +1549,10 @@ jobs:
         for result in "$MACOS_PROVIDERS_RESULT" "$MACOS_STEWARD_RESULT" "$MACOS_CMD_STEWARD_1_RESULT" "$MACOS_CMD_STEWARD_2_RESULT" "$MACOS_CMD_STEWARD_3_RESULT" "$MACOS_CMD_STEWARD_4_RESULT" "$MACOS_REST_1_RESULT" "$MACOS_REST_2_RESULT"; do
           bash scripts/macos-gate-rule.sh "$CHANGES_RESULT" "$MACOS_CHANGES" "$result" || fail=1
         done
+
+        # The live root-to-owner job (Issue #6464) has the same skip rule but is
+        # judged by its own call, not by the unit-leg loop above.
+        bash scripts/macos-gate-rule.sh "$CHANGES_RESULT" "$MACOS_CHANGES" "$MACOS_BREW_LIVE_RESULT" || fail=1
 
         if [ "$fail" -eq 0 ]; then
           echo "### BUILD GATE PASSED (PR stub)" >> $GITHUB_STEP_SUMMARY
