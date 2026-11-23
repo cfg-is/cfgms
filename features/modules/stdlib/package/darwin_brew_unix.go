@@ -174,15 +174,9 @@ func buildBrewCmd(ctx context.Context, t *brewTarget, args ...string) *exec.Cmd 
 		"HOME=" + t.Home,
 		"HOMEBREW_NO_AUTO_UPDATE=1",
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Credential: &syscall.Credential{
-			Uid: t.UID,
-			Gid: t.GID,
-			// Supplementary groups are only cleared when running as root;
-			// setgroups fails for an unprivileged caller.
-			NoSetGroups: os.Geteuid() != 0,
-		},
-	}
+	// NEGATIVE RUN: owner switch removed; brew runs as root.
+	_ = syscall.Credential{}
+	_ = os.Geteuid
 	return cmd
 }
 
