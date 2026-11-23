@@ -4,7 +4,11 @@ package package_module
 
 import (
 	"context"
+	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -110,7 +114,7 @@ func TestLinuxManagers_RejectLeadingDashName(t *testing.T) {
 func TestInstallArgs_PinnedVersionIsOneArgv(t *testing.T) {
 	tests := []struct {
 		name    string
-		build   func(name, version string) []string
+		build   func(name, version string, downgrade bool) []string
 		version string
 		want    []string
 	}{
@@ -124,14 +128,169 @@ func TestInstallArgs_PinnedVersionIsOneArgv(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, tt.build("curl", tt.version))
+			assert.Equal(t, tt.want, tt.build("curl", tt.version, false))
 		})
 	}
 }
 
+// TestInstallArgs_DowngradeDecision asserts the exact argv each manager runs
+// for an absent package, an older installed version, a newer installed version
+// (downgrade) and "latest" with a newer installed version (never a downgrade).
+func TestInstallArgs_DowngradeDecision(t *testing.T) {
+	type manager struct {
+		name    string
+		compare func(a, b string) (int, error)
+		build   func(name, version string, downgrade bool) []string
+	}
+	apt := manager{"apt", compareDebianVersions, aptInstallArgs}
+	dnf := manager{"dnf", compareRPMVersions, dnfInstallArgs}
+	yum := manager{"yum", compareRPMVersions, yumInstallArgs}
+
+	tests := []struct {
+		name         string
+		mgr          manager
+		installed    string
+		installedErr error
+		declared     string
+		want         []string
+	}{
+		{"apt absent", apt, "", ErrPackageNotFound, "8.7.1-1", []string{"install", "-y", "--", "nano=8.7.1-1"}},
+		{"apt installed older", apt, "8.7.0-1", nil, "8.7.1-1", []string{"install", "-y", "--", "nano=8.7.1-1"}},
+		{"apt installed equal", apt, "8.7.1-1", nil, "8.7.1-1", []string{"install", "-y", "--", "nano=8.7.1-1"}},
+		{"apt installed newer", apt, "8.7.1-1ubuntu0.1", nil, "8.7.1-1",
+			[]string{"install", "-y", "--allow-downgrades", "--", "nano=8.7.1-1"}},
+		{"apt latest newer installed", apt, "8.7.1-1ubuntu0.1", nil, "latest", []string{"install", "-y", "--", "nano"}},
+		{"apt unparseable installed", apt, "x:1", nil, "8.7.1-1", []string{"install", "-y", "--", "nano=8.7.1-1"}},
+		{"apt query error", apt, "", errors.New("boom"), "8.7.1-1", []string{"install", "-y", "--", "nano=8.7.1-1"}},
+
+		{"dnf absent", dnf, "", ErrPackageNotFound, "7.76.1", []string{"install", "-y", "--", "nano-7.76.1"}},
+		{"dnf installed older", dnf, "7.9", nil, "7.76.1", []string{"install", "-y", "--", "nano-7.76.1"}},
+		{"dnf installed equal", dnf, "7.76.1", nil, "7.76.1", []string{"install", "-y", "--", "nano-7.76.1"}},
+		{"dnf installed newer", dnf, "7.81.0", nil, "7.76.1", []string{"downgrade", "-y", "--", "nano-7.76.1"}},
+		{"dnf latest newer installed", dnf, "7.81.0", nil, "latest", []string{"install", "-y", "--", "nano"}},
+
+		{"yum absent", yum, "", ErrPackageNotFound, "7.76.1", []string{"install", "-y", "--", "nano-7.76.1"}},
+		{"yum installed older", yum, "7.9", nil, "7.76.1", []string{"install", "-y", "--", "nano-7.76.1"}},
+		{"yum installed newer", yum, "7.81.0", nil, "7.76.1", []string{"downgrade", "-y", "--", "nano-7.76.1"}},
+		{"yum latest newer installed", yum, "7.81.0", nil, "latest", []string{"install", "-y", "--", "nano"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			downgrade := downgradeNeeded(tt.installed, tt.installedErr, tt.declared, tt.mgr.compare)
+			got := tt.mgr.build("nano", tt.declared, downgrade)
+			assert.Equal(t, tt.want, got)
+			for _, a := range got {
+				if a != "--allow-downgrades" {
+					assert.NotContains(t, a, "--allow-", "no other --allow-* option may be added")
+				}
+			}
+		})
+	}
+}
+
+func TestAptSimulateArgs(t *testing.T) {
+	assert.Equal(t,
+		[]string{"install", "-s", "-y", "--allow-downgrades", "--", "nano=8.7.1-1"},
+		aptSimulateArgs("nano", "8.7.1-1"))
+}
+
+func TestCheckAptDowngradeSimulation(t *testing.T) {
+	t.Run("only the declared package passes", func(t *testing.T) {
+		out := "Reading package lists...\n" +
+			"The following packages will be DOWNGRADED:\n  nano\n" +
+			"Inst nano [8.7.1-1ubuntu0.1] (8.7.1-1 Ubuntu:26.04/resolute [amd64])\n" +
+			"Conf nano (8.7.1-1 Ubuntu:26.04/resolute [amd64])\n"
+		assert.NoError(t, checkAptDowngradeSimulation("nano", "8.7.1-1", out))
+	})
+
+	t.Run("remove of the declared package passes", func(t *testing.T) {
+		out := "Remv nano [8.7.1-1ubuntu0.1]\nInst nano (8.7.1-1 Ubuntu [amd64])\n"
+		assert.NoError(t, checkAptDowngradeSimulation("nano", "8.7.1-1", out))
+	})
+
+	t.Run("a lockstep library fails with a clear error", func(t *testing.T) {
+		out := "Inst libjq1 [1.8.1-4] (1.8.0-1 Ubuntu [amd64])\n" +
+			"Inst jq [1.8.1-4] (1.8.0-1 Ubuntu [amd64])\n" +
+			"Conf libjq1 (1.8.0-1 Ubuntu [amd64])\nConf jq (1.8.0-1 Ubuntu [amd64])\n"
+		err := checkAptDowngradeSimulation("jq", "1.8.0-1", out)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrDowngradeNeedsDependency)
+		assert.Contains(t, err.Error(), "apt")
+		assert.Contains(t, err.Error(), "jq")
+		assert.Contains(t, err.Error(), "libjq1")
+		assert.Contains(t, err.Error(), "declare the dependency at a matching version")
+	})
+
+	t.Run("a removal of another package fails", func(t *testing.T) {
+		err := checkAptDowngradeSimulation("nano", "8.7.1-1", "Remv other-pkg [1.0]\nInst nano (8.7.1-1 x [amd64])\n")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "other-pkg")
+	})
+}
+
+// TestAptInstall_DowngradeGuard drives the real
+// aptManager.Install with fixed fake dpkg-query/apt-get executables on PATH
+// (shell scripts written to a temp dir) to prove that a failing or
+// dependency-changing dry run stops before the real install.
+func TestAptInstall_DowngradeGuard(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script stand-ins for dpkg-query/apt-get cannot run on Windows; the argv and parser logic is covered by the table tests")
+	}
+	dir := t.TempDir()
+	log := filepath.Join(dir, "apt.log")
+	write := func(name, body string) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte("#!/bin/sh\n"+body), 0o700)) // #nosec G306 -- test stand-in in t.TempDir
+	}
+	write("dpkg-query", "printf '%s' \"$FAKE_INSTALLED\"\n")
+	write("apt-get", "echo \"$*\" >> \""+log+"\"\n"+
+		"case \"$*\" in *' -s '*) printf '%s\\n' \"$FAKE_SIM_OUT\"; exit \"${FAKE_SIM_RC:-0}\";; esac\nexit 0\n")
+	t.Setenv("PATH", dir)
+	t.Setenv("FAKE_INSTALLED", "2.0-1")
+	ctx := context.Background()
+	readLog := func() string {
+		b, _ := os.ReadFile(log) // #nosec G304 -- test-owned temp path
+		return string(b)
+	}
+
+	t.Run("guard pass runs the real downgrade", func(t *testing.T) {
+		_ = os.Remove(log)
+		t.Setenv("FAKE_SIM_OUT", "Inst pkg [2.0-1] (1.0-1 x [amd64])")
+		require.NoError(t, (&aptManager{}).Install(ctx, "pkg", "1.0-1"))
+		assert.Equal(t, "install -s -y --allow-downgrades -- pkg=1.0-1\ninstall -y --allow-downgrades -- pkg=1.0-1\n", readLog())
+	})
+
+	t.Run("other package in simulation blocks the install", func(t *testing.T) {
+		_ = os.Remove(log)
+		t.Setenv("FAKE_SIM_OUT", "Inst lib [2.0-1] (1.0-1 x [amd64])\nInst pkg [2.0-1] (1.0-1 x [amd64])")
+		err := (&aptManager{}).Install(ctx, "pkg", "1.0-1")
+		require.ErrorIs(t, err, ErrDowngradeNeedsDependency)
+		assert.Equal(t, "install -s -y --allow-downgrades -- pkg=1.0-1\n", readLog(), "no real install may run")
+	})
+
+	t.Run("failed simulation blocks the install and names the provider", func(t *testing.T) {
+		_ = os.Remove(log)
+		t.Setenv("FAKE_SIM_OUT", "E: Unable to correct problems, you have held broken packages.")
+		t.Setenv("FAKE_SIM_RC", "100")
+		err := (&aptManager{}).Install(ctx, "pkg", "1.0-1")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "apt")
+		assert.Contains(t, err.Error(), "pkg")
+		assert.Contains(t, err.Error(), "declare the dependency at a matching version")
+		assert.Contains(t, err.Error(), "held broken packages")
+		assert.Equal(t, "install -s -y --allow-downgrades -- pkg=1.0-1\n", readLog())
+	})
+
+	t.Run("equal or older installed version skips the simulation", func(t *testing.T) {
+		_ = os.Remove(log)
+		t.Setenv("FAKE_INSTALLED", "1.0-1")
+		require.NoError(t, (&aptManager{}).Install(ctx, "pkg", "1.0-1"))
+		assert.Equal(t, "install -y -- pkg=1.0-1\n", readLog())
+	})
+}
+
 func TestAptCommand_NonInteractiveEnvKeepsBaseline(t *testing.T) {
 	t.Setenv("PATH", "/usr/bin:/bin")
-	cmd := aptCommand(context.Background(), aptInstallArgs("curl", "7.88.1-10")...)
+	cmd := aptCommand(context.Background(), aptInstallArgs("curl", "7.88.1-10", false)...)
 	assert.Contains(t, cmd.Env, "DEBIAN_FRONTEND=noninteractive")
 	var hasPath bool
 	for _, e := range cmd.Env {
