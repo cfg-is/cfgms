@@ -5,6 +5,7 @@ package package_module
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -28,6 +29,45 @@ func pacmanOutputIsNotFound(output []byte) bool {
 		strings.Contains(string(output), "target not found")
 }
 
+// installCoordinate returns the package argument for an install command.
+// A pinned version is joined to the name with sep as one argv element
+// (apt: "name=ver", dnf/yum: "name-ver"); "latest" yields the bare name.
+func installCoordinate(name, version, sep string) string {
+	if version == "latest" {
+		return name
+	}
+	return name + sep + version
+}
+
+// aptInstallArgs builds the apt-get argv for installing name at version.
+// The coordinate follows "--" as a single element: "name" or "name=version".
+func aptInstallArgs(name, version string) []string {
+	return []string{"install", "-y", "--", installCoordinate(name, version, "=")}
+}
+
+// dnfInstallArgs builds the dnf argv for installing name at version
+// ("name" or "name-version", one element after "--").
+func dnfInstallArgs(name, version string) []string {
+	return []string{"install", "-y", "--", installCoordinate(name, version, "-")}
+}
+
+// yumInstallArgs builds the yum argv for installing name at version
+// ("name" or "name-version", one element after "--").
+func yumInstallArgs(name, version string) []string {
+	return []string{"install", "-y", "--", installCoordinate(name, version, "-")}
+}
+
+// aptCommand builds an apt-get command that never blocks on a debconf prompt.
+// DEBIAN_FRONTEND=noninteractive is set on this command only, on top of the
+// module process environment, so the shared baseline stays unchanged.
+func aptCommand(ctx context.Context, args ...string) *exec.Cmd {
+	// #nosec G204 -- fixed apt-get executable; callers pass validated
+	// coordinates after "--" as argv elements, with no shell.
+	cmd := exec.CommandContext(ctx, "apt-get", args...)
+	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	return cmd
+}
+
 // aptManager implements PackageManager for APT (Debian/Ubuntu)
 type aptManager struct{}
 
@@ -36,12 +76,9 @@ func newAptManager() PackageManager {
 }
 
 func (m *aptManager) Install(ctx context.Context, name, version string) error {
-	// #nosec G204 -- package name/version are validated before dispatch, "--"
-	// terminates options, and apt-get receives argv directly without a shell.
-	cmd := exec.CommandContext(ctx, "apt-get", "install", "-y", "--", name)
-	if version != "latest" {
-		cmd.Args = append(cmd.Args, "="+version)
-	}
+	// Name and version are validated before dispatch; "--" terminates options,
+	// and name=version is one argv element passed without a shell.
+	cmd := aptCommand(ctx, aptInstallArgs(name, version)...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
@@ -50,8 +87,8 @@ func (m *aptManager) Install(ctx context.Context, name, version string) error {
 }
 
 func (m *aptManager) Remove(ctx context.Context, name string) error {
-	// #nosec G204 -- validated name follows "--" as one argv to fixed apt-get.
-	cmd := exec.CommandContext(ctx, "apt-get", "remove", "-y", "--", name)
+	// Validated name follows "--" as one argv to fixed apt-get.
+	cmd := aptCommand(ctx, "remove", "-y", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to remove package %s: %w\nOutput: %s", name, err, string(output))
@@ -111,12 +148,9 @@ func newDnfManager() PackageManager {
 }
 
 func (m *dnfManager) Install(ctx context.Context, name, version string) error {
-	// #nosec G204 -- validated package coordinates follow "--" and are passed
-	// directly to the fixed dnf executable without shell interpretation.
-	cmd := exec.CommandContext(ctx, "dnf", "install", "-y", "--", name)
-	if version != "latest" {
-		cmd.Args = append(cmd.Args, "-"+version)
-	}
+	// #nosec G204 -- the validated name-version coordinate follows "--" as one
+	// argv element to the fixed dnf executable without shell interpretation.
+	cmd := exec.CommandContext(ctx, "dnf", dnfInstallArgs(name, version)...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
@@ -186,12 +220,9 @@ func newYumManager() PackageManager {
 }
 
 func (m *yumManager) Install(ctx context.Context, name, version string) error {
-	// #nosec G204 -- validated package coordinates follow "--" and are passed
-	// directly to the fixed yum executable without shell interpretation.
-	cmd := exec.CommandContext(ctx, "yum", "install", "-y", "--", name)
-	if version != "latest" {
-		cmd.Args = append(cmd.Args, "-"+version)
-	}
+	// #nosec G204 -- the validated name-version coordinate follows "--" as one
+	// argv element to the fixed yum executable without shell interpretation.
+	cmd := exec.CommandContext(ctx, "yum", yumInstallArgs(name, version)...)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
@@ -261,12 +292,15 @@ func newPacmanManager() PackageManager {
 }
 
 func (m *pacmanManager) Install(ctx context.Context, name, version string) error {
-	// #nosec G204 -- validated package coordinates follow "--" and are passed
-	// directly to the fixed pacman executable without shell interpretation.
-	cmd := exec.CommandContext(ctx, "pacman", "-S", "--noconfirm", "--", name)
+	// pacman cannot install an arbitrary older version from a sync repo, so a
+	// pin is rejected rather than silently installing a different version.
 	if version != "latest" {
-		cmd.Args = append(cmd.Args, "="+version)
+		return fmt.Errorf("pacman: %w: cannot install %s at version %q (declare version: latest)",
+			ErrVersionPinUnsupported, name, version)
 	}
+	// #nosec G204 -- validated name follows "--" as one argv to the fixed
+	// pacman executable without shell interpretation.
+	cmd := exec.CommandContext(ctx, "pacman", "-S", "--noconfirm", "--", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
