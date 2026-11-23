@@ -17,12 +17,16 @@ func newHomebrewManager() PackageManager {
 }
 
 func (m *homebrewManager) Install(ctx context.Context, name, version string) error {
-	// #nosec G204 -- Configure validates package names/versions, rejects leading
-	// dashes, fixes the brew executable, and passes values as argv without a shell.
-	cmd := exec.CommandContext(ctx, "brew", "install", name)
+	// Homebrew has no generic version pin. A versioned formula is declared by
+	// name (for example "python@3.12") with version: latest, so a pin is
+	// rejected rather than silently installing a different version.
 	if version != "latest" {
-		cmd.Args = append(cmd.Args, version)
+		return fmt.Errorf("brew: %w: cannot install %s at version %q (declare the versioned formula name, for example python@3.12, with version: latest)",
+			ErrVersionPinUnsupported, name, version)
 	}
+	// #nosec G204 -- Configure validates the package name and rejects leading
+	// dashes; the name is one argv to the fixed brew executable without a shell.
+	cmd := exec.CommandContext(ctx, "brew", "install", name)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))

@@ -33,6 +33,28 @@ package name. If omitted, `config.name` falls back to the resource identifier.
 | `providers` | Ordered provider allowlist; the first available provider is selected. Unknown names are rejected. |
 | `package_manager` | Legacy singular selector, used when `providers` is empty. Use current provider names below. |
 
+### Version pinning
+
+A declared `version` other than `latest` installs that version where the
+provider supports pinning, and is joined to the package name as a single
+argument. Drift detection compares the declared `version` with the installed
+version by exact string match, so use the form the provider reports:
+
+| Provider | Install argument | Accepted `version` form |
+|---|---|---|
+| `apt` | `name=version` | The full `dpkg-query ${Version}` string, including any epoch (for example `1:2.3-1`). |
+| `dnf` | `name-version` | The rpm `%{VERSION}` only, without the release (for example `7.76.1`). |
+| `yum` | `name-version` | The rpm `%{VERSION}` only, without the release (for example `7.76.1`). |
+| `winget`, `choco` | `--version` | The version string the provider reports. |
+| `pacman` | none | Pins are rejected. Use `version: latest`. |
+| `brew` | none | Pins are rejected. Declare the versioned formula name (for example `python@3.12`) with `version: latest`. |
+
+A provider that cannot pin returns an error that wraps
+`ErrVersionPinUnsupported` and names the provider; it runs no command and never
+installs a different version. `apt` install and remove run with
+`DEBIAN_FRONTEND=noninteractive` (set on those commands only), so a debconf
+question cannot block until the operation deadline.
+
 `state: absent` removes the package through the selected provider; it does not
 require a version. Provider/version configuration also affects observed state
 and comparison. The steward's convergence cycle determines when Set is needed;

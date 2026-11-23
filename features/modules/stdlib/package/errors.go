@@ -43,4 +43,8 @@ var (
 
 	// ErrInvalidPackageManager is returned when an invalid package manager is specified
 	ErrInvalidPackageManager = errors.New("invalid package manager")
+
+	// ErrVersionPinUnsupported is returned when a version pin is requested from
+	// a provider that cannot install a specific version
+	ErrVersionPinUnsupported = errors.New("version pinning is not supported by this provider")
 )

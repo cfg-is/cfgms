@@ -5,6 +5,7 @@ package package_module
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -104,4 +105,68 @@ func TestPacmanManager_GetInstalledVersion(t *testing.T) {
 // exec argv of a root-run package manager.
 func TestLinuxManagers_RejectLeadingDashName(t *testing.T) {
 	require.ErrorIs(t, validatePackageName("--allow-unauthenticated"), ErrInvalidPackageName)
+}
+
+func TestInstallArgs_PinnedVersionIsOneArgv(t *testing.T) {
+	tests := []struct {
+		name    string
+		build   func(name, version string) []string
+		version string
+		want    []string
+	}{
+		{"apt latest", aptInstallArgs, "latest", []string{"install", "-y", "--", "curl"}},
+		{"apt pinned", aptInstallArgs, "7.88.1-10", []string{"install", "-y", "--", "curl=7.88.1-10"}},
+		{"apt pinned epoch", aptInstallArgs, "1:2.3-1", []string{"install", "-y", "--", "curl=1:2.3-1"}},
+		{"dnf latest", dnfInstallArgs, "latest", []string{"install", "-y", "--", "curl"}},
+		{"dnf pinned", dnfInstallArgs, "7.76.1", []string{"install", "-y", "--", "curl-7.76.1"}},
+		{"yum latest", yumInstallArgs, "latest", []string{"install", "-y", "--", "curl"}},
+		{"yum pinned", yumInstallArgs, "7.76.1", []string{"install", "-y", "--", "curl-7.76.1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.build("curl", tt.version))
+		})
+	}
+}
+
+func TestAptCommand_NonInteractiveEnvKeepsBaseline(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin:/bin")
+	cmd := aptCommand(context.Background(), aptInstallArgs("curl", "7.88.1-10")...)
+	assert.Contains(t, cmd.Env, "DEBIAN_FRONTEND=noninteractive")
+	var hasPath bool
+	for _, e := range cmd.Env {
+		if strings.HasPrefix(e, "PATH=") {
+			hasPath = true
+		}
+	}
+	assert.True(t, hasPath, "apt command env must keep the baseline PATH")
+	assert.Equal(t, []string{"apt-get", "install", "-y", "--", "curl=7.88.1-10"}, cmd.Args)
+
+	rm := aptCommand(context.Background(), "remove", "-y", "--", "curl")
+	assert.Contains(t, rm.Env, "DEBIAN_FRONTEND=noninteractive")
+}
+
+func TestInstall_PinUnsupportedProviders(t *testing.T) {
+	// An empty PATH means any attempt to start pacman/brew fails with a
+	// lookup error, so ErrVersionPinUnsupported proves no command was started.
+	t.Setenv("PATH", t.TempDir())
+	ctx := context.Background()
+
+	err := (&pacmanManager{}).Install(ctx, "x", "1.0")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrVersionPinUnsupported)
+	assert.Contains(t, err.Error(), "pacman")
+
+	err = (&homebrewManager{}).Install(ctx, "x", "1.0")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrVersionPinUnsupported)
+	assert.Contains(t, err.Error(), "brew")
+
+	// latest is not rejected as a pin: it reaches exec and fails on lookup.
+	err = (&pacmanManager{}).Install(ctx, "x", "latest")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrVersionPinUnsupported)
+	err = (&homebrewManager{}).Install(ctx, "x", "latest")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, ErrVersionPinUnsupported)
 }
