@@ -720,11 +720,19 @@ func TestExecutor_RunTargetedReconcile_FailingResourceDoesNotStarveOthers(t *tes
 
 	// Interleave: fire the failing resource's event repeatedly (well past its
 	// budget), and the healthy resource's event once after each.
+	//
+	// Each good1 event is confirmed processed (its GetCallCount rises above the
+	// value read just before it was sent) before the next is sent, so two good1
+	// events can never land in one debounce window and coalesce. This does not
+	// depend on sleep length or the platform timer resolution (about 15.6 ms on
+	// Windows). The delta is relative because the first reconcile calls Get twice
+	// (reconcile plus verifyChanges after a successful Set) and later ones once.
 	for i := 0; i < 10; i++ {
 		bad.SendChange(modules.ChangeEvent{ResourceID: "bad1", ChangeType: modules.ChangeTypeModified})
-		time.Sleep(15 * time.Millisecond)
+		before := good.GetCallCount()
 		good.SendChange(modules.ChangeEvent{ResourceID: "good1", ChangeType: modules.ChangeTypeModified})
-		time.Sleep(15 * time.Millisecond)
+		require.Eventually(t, func() bool { return good.GetCallCount() > before }, 5*time.Second, 2*time.Millisecond,
+			"good1 event %d must be reconciled, unaffected by the failing resource", i)
 	}
 
 	assert.LessOrEqual(t, bad.SetCallCount(), maxTargetedReconcileFailuresForTest,
@@ -733,8 +741,9 @@ func TestExecutor_RunTargetedReconcile_FailingResourceDoesNotStarveOthers(t *tes
 	// drift and never call Set again — GetCallCount (incremented on every
 	// dispatched reconcile, converged or not) is the proof each of its 10
 	// events was actually processed rather than starved behind bad1's noise.
-	// >= rather than == : debounce-window timing can coalesce or split a fire
-	// by one at these millisecond scales, which is not what this test is about.
+	// >= rather than == : the first reconcile calls Get twice (reconcile plus
+	// verifyChanges), so the total exceeds 10. Coalescing cannot lower it
+	// because every fire was confirmed processed before the next was sent.
 	assert.GreaterOrEqual(t, good.GetCallCount(), 10,
 		"the healthy resource must be reconciled for every one of its own events, unaffected by the failing resource")
 }
