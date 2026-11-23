@@ -18,6 +18,42 @@ import (
 	"syscall"
 )
 
+// Homebrew install locations. The steward never resolves brew through PATH:
+// the Apple silicon prefix is not on launchd's default PATH and module
+// processes inherit a minimal environment, so the binary is located by its
+// fixed per-architecture path.
+const (
+	brewBinArm64  = "/opt/homebrew/bin/brew"
+	brewRepoArm64 = "/opt/homebrew"
+	brewBinAmd64  = "/usr/local/bin/brew"
+	// On Intel /usr/local itself is root-owned; the Homebrew repository
+	// directory is the one the installing user owns.
+	brewRepoAmd64 = "/usr/local/Homebrew"
+)
+
+// brewLocation is where Homebrew lives for one architecture.
+type brewLocation struct {
+	// BinPath is the fixed path of the brew executable (a symlink into the
+	// repository on both architectures).
+	BinPath string
+	// RepoDir is the Homebrew repository directory whose owner is the
+	// prefix owner brew runs as.
+	RepoDir string
+}
+
+// brewLocationFor returns the fixed Homebrew locations for goarch. It is pure
+// so both architectures are testable on any host.
+func brewLocationFor(goarch string) (brewLocation, error) {
+	switch goarch {
+	case "arm64":
+		return brewLocation{BinPath: brewBinArm64, RepoDir: brewRepoArm64}, nil
+	case "amd64":
+		return brewLocation{BinPath: brewBinAmd64, RepoDir: brewRepoAmd64}, nil
+	default:
+		return brewLocation{}, fmt.Errorf("homebrew: unsupported architecture %q (supported: arm64, amd64)", goarch)
+	}
+}
+
 // brewTarget is a verified Homebrew installation and the identity brew runs as.
 type brewTarget struct {
 	BinPath string
