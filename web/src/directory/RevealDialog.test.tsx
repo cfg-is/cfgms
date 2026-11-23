@@ -12,6 +12,7 @@ import { AuthProvider } from '../auth/AuthContext.tsx'
 import CredentialsPage from './CredentialsPage.tsx'
 import RevealDialog from './RevealDialog.tsx'
 import type { PendingCredential } from './credentialsApi.ts'
+import { withSessionProbe } from '../test/sessionProbe.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
 const SECRET = 'S3cret-Initial-Pw!'
@@ -30,7 +31,7 @@ let logged: string[] = []
 
 beforeEach(() => {
   fetchMock.mockReset()
-  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('fetch', withSessionProbe(fetchMock))
   logged = []
   for (const method of ['log', 'info', 'warn', 'error', 'debug'] as const) {
     vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {

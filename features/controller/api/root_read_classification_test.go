@@ -208,6 +208,7 @@ var rootReadClassification = map[string]rootReadEntry{
 	"/api/v1/triggers/health":                                        {rootReadPlatform, "trigger subsystem liveness, no tenant data (Decision 4: system and platform logs and metrics)"},
 	"/api/v1/triggers/{id}":                                          {rootReadCrossing, ""},
 	"/api/v1/triggers/{id}/executions":                               {rootReadCrossing, ""},
+	"/api/v1/web/session":                                            {rootReadOwnScope, ""},
 	"/api/v1/workflows":                                              {rootReadCrossing, ""},
 	"/api/v1/workflows/approvals":                                    {rootReadCrossing, ""},
 	"/api/v1/workflows/{id}":                                         {rootReadCrossing, ""},

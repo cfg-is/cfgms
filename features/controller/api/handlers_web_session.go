@@ -9,6 +9,10 @@
 //
 //	GET  /api/v1/web/csrf   — issues the ADR-018 §3 pre-session CSRF cookie
 //	POST /api/v1/web/logout — session-CSRF-checked; server-side revocation + cookie clearing
+//
+// Registered on the authenticated /api/v1 subrouter (routes_web_session.go):
+//
+//	GET  /api/v1/web/session — the signed-in web session's own principal
 package api
 
 import (
@@ -123,6 +127,78 @@ func (s *Server) handleWebLogout(w http.ResponseWriter, r *http.Request) {
 		"remote_addr", logging.SanitizeLogValue(r.RemoteAddr))
 
 	s.writeSuccessResponse(w, map[string]interface{}{"ok": true})
+}
+
+// handleGetWebSession handles GET /api/v1/web/session.
+//
+// It returns the principal behind the caller's cookie web session, in the same shape
+// (and through the same helper) as the passkey login finish response, so the web
+// console can restore its principal after a page reload or deep link. The session
+// cookie is HttpOnly, so the UI has no other way to learn it.
+//
+// Read-only and self-scope: no permission guard and no assurance minimum, because a
+// session may always read its own identity. The body carries no permission list and no
+// session or CSRF identifier. A request that is not cookie-authenticated (API key,
+// mTLS, Bearer session) is refused with 401 SESSION_REQUIRED rather than answered with
+// a synthesised principal; a session or account that cannot be loaded is a 401 with the
+// same non-distinguishing body the authentication middleware uses.
+func (s *Server) handleGetWebSession(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	principal, _ := ctx.Value(principalContextKey).(*Principal)
+	if principal == nil {
+		s.writeErrorResponse(w, http.StatusUnauthorized, "Authentication required", "AUTHENTICATION_REQUIRED")
+		return
+	}
+
+	sessID, _ := ctx.Value(webSessionIDContextKey).(string)
+	if sessID == "" {
+		s.writeErrorResponse(w, http.StatusUnauthorized,
+			"A cookie-authenticated web session is required", "SESSION_REQUIRED")
+		return
+	}
+
+	s.mu.RLock()
+	mgr := s.webSessionManager
+	s.mu.RUnlock()
+	if mgr == nil {
+		s.writeWebSessionInvalid(w)
+		return
+	}
+
+	sess, err := mgr.GetByID(ctx, sessID)
+	if err != nil || sess == nil {
+		s.logger.Warn("Web session read: session not found",
+			"session_id", logging.SanitizeLogValue(sessID),
+			"error", logging.SanitizeLogValue(errorText(err)))
+		s.writeWebSessionInvalid(w)
+		return
+	}
+
+	acct, err := s.getAccountByID(ctx, principal.ID)
+	if err != nil || acct == nil {
+		s.logger.Warn("Web session read: account not found",
+			"principal_id", logging.SanitizeLogValue(principal.ID),
+			"error", logging.SanitizeLogValue(errorText(err)))
+		s.writeWebSessionInvalid(w)
+		return
+	}
+
+	s.writeResponse(w, http.StatusOK, s.webPrincipalResponse(ctx, acct, sess.AbsoluteExpiresAt))
+}
+
+// writeWebSessionInvalid writes the 401 the authentication middleware uses for a session
+// token that does not resolve, so a failed session read does not say which part failed.
+func (s *Server) writeWebSessionInvalid(w http.ResponseWriter) {
+	s.writeErrorResponse(w, http.StatusUnauthorized, "Invalid session token", "INVALID_SESSION_TOKEN")
+}
+
+// errorText returns err's message, or "" for a nil error (a lookup that found nothing).
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // clearWebSessionCookies expires both the session and CSRF cookies (Max-Age=0).

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import App from './App.tsx'
+import { withSessionProbe } from './test/sessionProbe.ts'
 
 function jsonResponse(status: number, body: unknown = {}): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -16,7 +17,7 @@ const fetchMock = vi.fn<typeof fetch>()
 
 beforeEach(() => {
   fetchMock.mockReset()
-  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('fetch', withSessionProbe(fetchMock))
 })
 
 afterEach(() => {
@@ -277,6 +278,8 @@ describe('App', () => {
   })
 
   it('reaches the CLI login confirmation screen at /login/confirm as a top-level unauthenticated route', async () => {
+    // A session-less visitor: the provider's session read 401s along with every other call.
+    vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValue(jsonResponse(401))
     render(
       <MemoryRouter initialEntries={['/login/confirm?request_id=cli-login-abc']}>

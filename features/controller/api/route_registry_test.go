@@ -275,6 +275,7 @@ var goldenRouteTable = []string{
 	"POST /api/v1/terminal/prepare/{steward_id}",
 	"POST /api/v1/terminal/tickets/{steward_id}",
 	"GET /api/v1/web/csrf",
+	"GET /api/v1/web/session",
 	"OPTIONS /api/v1/health",
 	"OPTIONS /api/v1/ready",
 	"OPTIONS /api/v1/register",

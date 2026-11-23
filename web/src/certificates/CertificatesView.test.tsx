@@ -11,11 +11,12 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import CertificatesView from './CertificatesView.tsx'
+import { withSessionProbe } from '../test/sessionProbe.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('fetch', withSessionProbe(fetchMock))
   fetchMock.mockReset()
 })
 

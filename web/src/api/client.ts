@@ -376,26 +376,71 @@ export async function passkeyLoginFinishRequest(assertion: AssertionJSON): Promi
   if (!response.ok) {
     return { ok: false, status: response.status, username: '', tenantId: '', rootScope: false, expiresAt: null }
   }
-  let username = ''
-  let tenantId = ''
-  let rootScope = false
-  let expiresAt: number | null = null
+  const principal = await readWebPrincipal(response)
+  return { ok: true, status: response.status, ...principal.value }
+}
+
+/** The principal fields every web-principal response carries (login finish, GET /web/session). */
+type WebPrincipalFields = Pick<LoginResult, 'username' | 'tenantId' | 'rootScope' | 'expiresAt'>
+
+/**
+ * Parses the PasskeyLoginFinishResponse body shared by the passkey login finish
+ * and GET /api/v1/web/session (username, tenant_id, root_scope, expires_at) in
+ * one place. `complete` is true only when the server supplied a username, a
+ * tenant_id and a root_scope: a body that is not complete must not be taken as
+ * a principal (an empty tenant_id means root).
+ */
+async function readWebPrincipal(
+  response: Response,
+): Promise<{ value: WebPrincipalFields; complete: boolean }> {
+  const value: WebPrincipalFields = { username: '', tenantId: '', rootScope: false, expiresAt: null }
+  let hasUsername = false
+  let hasTenant = false
+  let hasRootScope = false
   try {
     const body = (await response.json()) as Record<string, unknown>
     const data = body.data as Record<string, unknown> | undefined
     if (data !== undefined && data !== null) {
-      if (typeof data.username === 'string') username = data.username
-      if (typeof data.tenant_id === 'string') tenantId = data.tenant_id
-      if (typeof data.root_scope === 'boolean') rootScope = data.root_scope
+      if (typeof data.username === 'string') {
+        value.username = data.username
+        hasUsername = true
+      }
+      if (typeof data.tenant_id === 'string') {
+        value.tenantId = data.tenant_id
+        hasTenant = true
+      }
+      if (typeof data.root_scope === 'boolean') {
+        value.rootScope = data.root_scope
+        hasRootScope = true
+      }
       if (typeof data.expires_at === 'string') {
         const ms = Date.parse(data.expires_at)
-        if (!Number.isNaN(ms)) expiresAt = ms
+        if (!Number.isNaN(ms)) value.expiresAt = ms
       }
     }
   } catch {
-    // Body parse is best-effort; tenant scoping falls back to root (safest for UI).
+    // Body parse is best-effort for login; the session read treats it as incomplete.
   }
-  return { ok: true, status: response.status, username, tenantId, rootScope, expiresAt }
+  return { value, complete: hasUsername && hasTenant && hasRootScope }
+}
+
+/**
+ * Reads the signed-in session's own principal (GET /api/v1/web/session). The
+ * session cookie is HttpOnly, so this is how the console restores the principal
+ * after a page reload or a deep link. Goes through apiFetch, so a plain 401 takes
+ * the session-expired path and a valid session fires onSessionConfirmed. A 2xx
+ * response without a complete principal is reported as not ok, never as root.
+ */
+export async function fetchWebSession(): Promise<LoginResult> {
+  const response = await apiFetch('/api/v1/web/session')
+  if (!response.ok) {
+    return { ok: false, status: response.status, username: '', tenantId: '', rootScope: false, expiresAt: null }
+  }
+  const principal = await readWebPrincipal(response)
+  if (!principal.complete) {
+    return { ok: false, status: response.status, username: '', tenantId: '', rootScope: false, expiresAt: null }
+  }
+  return { ok: true, status: response.status, ...principal.value }
 }
 
 /**

@@ -23,11 +23,12 @@ import RefreshQueuePage, {
   parsePendingRefreshEntry,
   parsePendingRefreshList,
 } from './RefreshQueuePage.tsx'
+import { withSessionProbe } from '../test/sessionProbe.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('fetch', withSessionProbe(fetchMock))
   fetchMock.mockReset()
 })
 

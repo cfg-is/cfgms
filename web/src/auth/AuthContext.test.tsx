@@ -741,9 +741,34 @@ describe('RequireAuth route guard', () => {
   })
 })
 
+/** Exposes the full restored principal (not only username/tenant) to the tests. */
+function PrincipalProbe() {
+  const auth = useAuth()
+  return (
+    <div>
+      <output data-testid="status">{auth.status}</output>
+      <output data-testid="username">{auth.principal?.username ?? 'null'}</output>
+      <output data-testid="tenantId">{auth.principal === null ? 'null' : `[${auth.principal.tenantId}]`}</output>
+      <output data-testid="rootScope">{auth.principal === null ? 'null' : String(auth.principal.rootScope)}</output>
+      <output data-testid="principalExpiresAt">{auth.principal?.expiresAt ?? 'null'}</output>
+      <output data-testid="expiresAt">{auth.expiresAt ?? 'null'}</output>
+      <output data-testid="probing">{String(auth.probing)}</output>
+    </div>
+  )
+}
+
+/** Routes GET /api/v1/web/session to `session`; every other request answers 200 `{}`. */
+function mockSessionEndpoint(session: () => Response) {
+  fetchMock.mockImplementation((input) =>
+    Promise.resolve(String(input) === '/api/v1/web/session' ? session() : jsonResponse(200)),
+  )
+}
+
 describe('AuthProvider — session probe (Story #2933)', () => {
   it('initial mount with successful data call → signedIn (valid session cookie)', async () => {
-    fetchMock.mockResolvedValue(jsonResponse(200))
+    mockSessionEndpoint(() =>
+      jsonResponse(200, envelope({ ok: true, username: 'admin@msp-a', tenant_id: 'msp-a', root_scope: false })),
+    )
     render(
       <AuthProvider>
         <Probe />
@@ -805,5 +830,118 @@ describe('AuthProvider — session probe (Story #2933)', () => {
       expect(screen.getByTestId('status')).toHaveTextContent('invalid'),
     )
     expect(screen.queryByTestId('status')?.textContent).toBe('invalid')
+  })
+})
+
+describe('AuthProvider — principal restore on mount (Issue #6473)', () => {
+  const expiresIso = '2099-01-01T00:00:00Z'
+
+  it('restores username, tenantId, rootScope and expiresAt from the session endpoint without login()', async () => {
+    mockSessionEndpoint(() =>
+      jsonResponse(
+        200,
+        envelope({ ok: true, username: 'msp-user', tenant_id: 'msp-a', root_scope: false, expires_at: expiresIso }),
+      ),
+    )
+    render(
+      <AuthProvider>
+        <PrincipalProbe />
+      </AuthProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('signedIn'))
+    const expectedMs = String(Date.parse(expiresIso))
+    expect(screen.getByTestId('username')).toHaveTextContent('msp-user')
+    expect(screen.getByTestId('tenantId')).toHaveTextContent('[msp-a]')
+    expect(screen.getByTestId('rootScope')).toHaveTextContent('false')
+    expect(screen.getByTestId('principalExpiresAt')).toHaveTextContent(expectedMs)
+    expect(screen.getByTestId('expiresAt')).toHaveTextContent(expectedMs)
+    expect(screen.getByTestId('probing')).toHaveTextContent('false')
+    expect(window.sessionStorage.getItem('cfgms.session.expiresAt')).toBe(expectedMs)
+
+    // Restored by the session read alone: no login ceremony endpoint was touched.
+    const paths = fetchMock.mock.calls.map(([input]) => String(input))
+    expect(paths).toContain('/api/v1/web/session')
+    expect(paths.some((p) => p.includes('/passkey/login/'))).toBe(false)
+  })
+
+  it('restores a root-scope principal as root, from what the server returned', async () => {
+    mockSessionEndpoint(() =>
+      jsonResponse(200, envelope({ ok: true, username: 'root-op', tenant_id: 'root', root_scope: true, expires_at: expiresIso })),
+    )
+    render(
+      <AuthProvider>
+        <PrincipalProbe />
+      </AuthProvider>,
+    )
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('signedIn'))
+    expect(screen.getByTestId('tenantId')).toHaveTextContent('[root]')
+    expect(screen.getByTestId('rootScope')).toHaveTextContent('true')
+  })
+
+  it('a 401 from the endpoint leaves principal null and status not signedIn', async () => {
+    mockSessionEndpoint(() => jsonResponse(401, { error: { code: 'MISSING_API_KEY' } }))
+    render(
+      <AuthProvider>
+        <PrincipalProbe />
+      </AuthProvider>,
+    )
+    await waitFor(() => expect(screen.getByTestId('probing')).toHaveTextContent('false'))
+    expect(screen.getByTestId('status')).toHaveTextContent('signedOut')
+    expect(screen.getByTestId('username')).toHaveTextContent('null')
+    expect(screen.getByTestId('tenantId')).toHaveTextContent('null')
+    expect(screen.getByTestId('expiresAt')).toHaveTextContent('null')
+  })
+
+  it('a 200 without a complete principal is never taken as root: principal stays null, not signedIn', async () => {
+    mockSessionEndpoint(() => jsonResponse(200, envelope({ ok: true })))
+    render(
+      <AuthProvider>
+        <PrincipalProbe />
+      </AuthProvider>,
+    )
+    await waitFor(() => expect(screen.getByTestId('probing')).toHaveTextContent('false'))
+    expect(screen.getByTestId('status')).toHaveTextContent('signedOut')
+    expect(screen.getByTestId('username')).toHaveTextContent('null')
+    expect(screen.getByTestId('tenantId')).toHaveTextContent('null')
+  })
+
+  it('a server error from the endpoint leaves principal null and status not signedIn', async () => {
+    mockSessionEndpoint(() => jsonResponse(500, { error: { code: 'INTERNAL' } }))
+    render(
+      <AuthProvider>
+        <PrincipalProbe />
+      </AuthProvider>,
+    )
+    await waitFor(() => expect(screen.getByTestId('probing')).toHaveTextContent('false'))
+    expect(screen.getByTestId('status')).toHaveTextContent('signedOut')
+    expect(screen.getByTestId('username')).toHaveTextContent('null')
+  })
+
+  it('a network failure reading the session leaves principal null and status not signedIn', async () => {
+    fetchMock.mockRejectedValue(new TypeError('network down'))
+    render(
+      <AuthProvider>
+        <PrincipalProbe />
+      </AuthProvider>,
+    )
+    await waitFor(() => expect(screen.getByTestId('probing')).toHaveTextContent('false'))
+    expect(screen.getByTestId('status')).toHaveTextContent('signedOut')
+    expect(screen.getByTestId('username')).toHaveTextContent('null')
+  })
+
+  it('login() still sets the principal from the login response', async () => {
+    mockPasskeyLoginEndpoints(200, {
+      data: { ok: true, username: 'admin@msp-a', tenant_id: 'msp-a', root_scope: false },
+    })
+    render(
+      <AuthProvider>
+        <Probe />
+      </AuthProvider>,
+    )
+    act(() => screen.getByText('do-login').click())
+    await waitFor(() => expect(screen.getByTestId('principal')).toHaveTextContent('admin@msp-a'))
+    expect(screen.getByTestId('tenantId')).toHaveTextContent('msp-a')
+    expect(screen.getByTestId('status')).toHaveTextContent('signedIn')
   })
 })

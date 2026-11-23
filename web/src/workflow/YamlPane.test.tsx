@@ -7,12 +7,13 @@ import { act, cleanup, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import YamlPane from './YamlPane.tsx'
+import { withSessionProbe } from '../test/sessionProbe.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
 
 beforeEach(() => {
   vi.useFakeTimers()
-  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('fetch', withSessionProbe(fetchMock))
   fetchMock.mockReset()
 })
 

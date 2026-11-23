@@ -9,7 +9,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router'
+import { MemoryRouter, Route, Routes } from 'react-router'
+import { AuthProvider } from '../auth/AuthContext.tsx'
+import AppShell from '../shell/AppShell.tsx'
 import { TenantScopeProvider } from '../shell/TenantScopeContext.tsx'
 import BillingReportView from './BillingReportView.tsx'
 
@@ -283,5 +285,52 @@ describe('MSP view', () => {
     expect(alert).toHaveTextContent('500')
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(screen.getByText('Acme Corp')).toBeInTheDocument())
+  })
+})
+
+describe('direct navigation with an existing session (Issue #6473)', () => {
+  // A page reload or a deep link mounts the app with a valid session cookie and no
+  // login: the principal must come from GET /api/v1/web/session, not default to root.
+  function renderApp(session: { username: string; tenant_id: string; root_scope: boolean }) {
+    serve({
+      '/api/v1/web/session': () =>
+        json(200, {
+          data: { ok: true, ...session, expires_at: new Date(Date.now() + 3600_000).toISOString() },
+        }),
+      // The server answers the root report to a root session only.
+      '/api/v1/billing/report': () =>
+        session.root_scope ? json(200, ROOT_BODY) : json(403, { error: { code: 'BILLING_ROOT_ONLY' } }),
+      '/api/v1/tenants': () => json(200, TENANT_LIST),
+      '/api/v1/tenants/msp-a/billing-report': () => json(200, TENANT_BODY),
+    })
+    return render(
+      <MemoryRouter initialEntries={['/billing']}>
+        <AuthProvider>
+          <Routes>
+            <Route path="/" element={<AppShell />}>
+              <Route path="billing" element={<BillingReportView />} />
+            </Route>
+          </Routes>
+        </AuthProvider>
+      </MemoryRouter>,
+    )
+  }
+
+  it("an MSP-tenant user opening /billing gets their own subtree's report, never the root report", async () => {
+    renderApp({ username: 'msp-user', tenant_id: 'msp-a', root_scope: false })
+
+    await screen.findByText('Acme Corp')
+    expect(requested()).toContain('/api/v1/web/session')
+    expect(requested()).toContain('/api/v1/tenants/msp-a/billing-report')
+    expect(requested()).not.toContain('/api/v1/billing/report')
+    expect(screen.queryByText(/could not load the billing report/i)).not.toBeInTheDocument()
+  })
+
+  it('a root-scope user opening /billing still gets the root report', async () => {
+    renderApp({ username: 'root-op', tenant_id: '', root_scope: true })
+
+    await screen.findByTestId('billing-root')
+    expect(requested()).toContain('/api/v1/billing/report')
+    expect(requested().some((u) => u.includes('/billing-report'))).toBe(false)
   })
 })

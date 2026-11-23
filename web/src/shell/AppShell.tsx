@@ -9,6 +9,11 @@
  * <Outlet> (Story #2723); the global search box is passed to the outlet
  * context so FleetOverview can live-filter without prop drilling through
  * the route table.
+ *
+ * The shell renders its tenant-dependent content only once the signed-in
+ * principal is known (restored by AuthProvider after a reload or deep link);
+ * until then it shows a loading state and makes no tenant-dependent request,
+ * so no view can mistake an unknown caller for the root operator.
  */
 import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation } from 'react-router'
@@ -20,7 +25,7 @@ import UserMenu from './UserMenu.tsx'
 import ControllerChip from './ControllerChip.tsx'
 import ElevationBanner from './ElevationBanner.tsx'
 import { useActiveCrossings } from './useActiveCrossings.ts'
-import { useAuth } from '../auth/AuthContext.tsx'
+import { useAuth, type Principal } from '../auth/AuthContext.tsx'
 import { probeDirectoryAccess } from '../directory/directoryApi.ts'
 import './AppShell.css'
 
@@ -58,10 +63,21 @@ const NAV_ITEMS = [
 
 export default function AppShell() {
   const { principal } = useAuth()
+  if (principal === null) {
+    return (
+      <div className="content" role="status" aria-live="polite" data-testid="shell-loading">
+        Loading…
+      </div>
+    )
+  }
+  return <AppShellContent principal={principal} />
+}
+
+function AppShellContent({ principal }: { principal: Principal }) {
   const [drawerOpen, setDrawerOpen] = useState(false)
   const [search, setSearch] = useState('')
   const { crossings, refresh } = useActiveCrossings()
-  const isRoot = principal?.rootScope === true
+  const isRoot = principal.rootScope
   const location = useLocation()
   const inDirectory = location.pathname.startsWith('/directory/')
   // Directory entry shows only when directory:read is proven (Issue #5565).
@@ -75,7 +91,7 @@ export default function AppShell() {
     return () => {
       cancelled = true
     }
-  }, [principal?.username, principal?.tenantId])
+  }, [principal.username, principal.tenantId])
 
   useEffect(() => {
     document.body.classList.toggle('drawer', drawerOpen)
@@ -92,7 +108,7 @@ export default function AppShell() {
   }, [drawerOpen])
 
   return (
-    <TenantScopeProvider rootPath={principal?.tenantId ?? ''}>
+    <TenantScopeProvider rootPath={principal.tenantId}>
       <div
         className="scrim"
         data-testid="shell-scrim"

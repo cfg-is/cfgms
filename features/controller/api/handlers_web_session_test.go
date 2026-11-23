@@ -1077,3 +1077,163 @@ func TestPasskeyLoginFinish_SignCountClone_400(t *testing.T) {
 	assert.Equal(t, "WEBAUTHN_VERIFY_ERROR", errCode(t, rec.Body.Bytes()),
 		"non-advancing sign count must be rejected (authenticator clone detection)")
 }
+
+// --- GET /api/v1/web/session ---
+
+// getWebSessionEndpoint drives GET /api/v1/web/session through the real router and
+// authentication middleware with the given credential setup.
+func getWebSessionEndpoint(srv *Server, mutate func(*http.Request)) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/web/session", nil)
+	if mutate != nil {
+		mutate(req)
+	}
+	rec := httptest.NewRecorder()
+	srv.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// webSessionServerWithAccount returns a passkey-session server and a cookie for a session
+// minted as passkey login mints it, for a fresh account created with req.
+func webSessionServerWithAccount(t *testing.T, req AccountRequest) (*Server, *account, *http.Cookie) {
+	t.Helper()
+	srv, _ := setupPasskeySessionServer(t)
+	rec := postAccount(t, srv, testAdminPrincipal(), req)
+	require.Equal(t, http.StatusCreated, rec.Code, "account setup: %s", rec.Body.String())
+	injectCredentialWith(t, srv, req.Username, WebAuthnCredential{ID: sessEndCredX})
+	acct, err := srv.getAccount(context.Background(), req.Username)
+	require.NoError(t, err)
+	require.NotNil(t, acct)
+	return srv, acct, sessEndLogin(t, srv.webSessionManager, acct, sessEndCredX)
+}
+
+// TestWebSessionEndpoint covers GET /api/v1/web/session: the signed-in session's own
+// principal, restored after a page reload, with no permission list and no session or
+// CSRF identifier.
+func TestWebSessionEndpoint(t *testing.T) {
+	decode := func(t *testing.T, rec *httptest.ResponseRecorder) PasskeyLoginFinishResponse {
+		t.Helper()
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+		var env struct {
+			Data PasskeyLoginFinishResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env), "body: %s", rec.Body.String())
+		return env.Data
+	}
+
+	t.Run("MSP-tenant session returns that tenant and root_scope=false", func(t *testing.T) {
+		srv, acct, cookie := webSessionServerWithAccount(t, AccountRequest{Username: "msp-user", TenantID: "tenant-a"})
+		rec := getWebSessionEndpoint(srv, func(r *http.Request) { r.AddCookie(cookie) })
+		got := decode(t, rec)
+
+		assert.True(t, got.OK)
+		assert.Equal(t, "msp-user", got.Username)
+		assert.Equal(t, "tenant-a", got.TenantID)
+		assert.False(t, got.RootScope)
+
+		sess, err := srv.webSessionManager.GetByID(context.Background(), webSessionIDFor(t, srv, cookie))
+		require.NoError(t, err)
+		assert.True(t, sess.AbsoluteExpiresAt.Equal(got.ExpiresAt),
+			"expires_at %s must equal the session's AbsoluteExpiresAt %s", got.ExpiresAt, sess.AbsoluteExpiresAt)
+		want := srv.webPrincipalResponse(context.Background(), acct, sess.AbsoluteExpiresAt)
+		assert.True(t, want.ExpiresAt.Equal(got.ExpiresAt))
+		want.ExpiresAt = got.ExpiresAt // same instant; the JSON round trip drops the location
+		assert.Equal(t, want, got,
+			"the endpoint body must equal what the shared login helper builds for the same account and session")
+	})
+
+	t.Run("root-scope session returns the root tenant and root_scope=true", func(t *testing.T) {
+		srv, _, cookie := webSessionServerWithAccount(t, AccountRequest{Username: "root-user", RootScope: true})
+		got := decode(t, getWebSessionEndpoint(srv, func(r *http.Request) { r.AddCookie(cookie) }))
+
+		assert.True(t, got.OK)
+		assert.Equal(t, "root-user", got.Username)
+		assert.Equal(t, testRootTenantID, got.TenantID)
+		assert.True(t, got.RootScope)
+	})
+
+	t.Run("no cookie returns 401", func(t *testing.T) {
+		srv, _ := setupPasskeySessionServer(t)
+		rec := getWebSessionEndpoint(srv, nil)
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("an unknown session cookie returns 401", func(t *testing.T) {
+		srv, _ := setupPasskeySessionServer(t)
+		rec := getWebSessionEndpoint(srv, func(r *http.Request) {
+			r.AddCookie(&http.Cookie{Name: cookieWebSession, Value: "not-a-live-session-token"})
+		})
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("an API-key caller gets 401 SESSION_REQUIRED", func(t *testing.T) {
+		srv, _ := setupPasskeySessionServer(t)
+		key := NewEphemeralTestKey(t, srv, []string{"steward:list"}, testRootTenantID, 5*time.Minute)
+		rec := getWebSessionEndpoint(srv, func(r *http.Request) { r.Header.Set("X-API-Key", key) })
+		require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "SESSION_REQUIRED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("a principal without a web session ID gets 401 SESSION_REQUIRED", func(t *testing.T) {
+		srv, _ := setupPasskeySessionServer(t)
+		req := withPrincipal(httptest.NewRequest(http.MethodGet, "/api/v1/web/session", nil), testAdminPrincipal())
+		rec := httptest.NewRecorder()
+		srv.handleGetWebSession(rec, req)
+		require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "SESSION_REQUIRED", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("a handler call with no principal gets 401", func(t *testing.T) {
+		srv, _ := setupPasskeySessionServer(t)
+		rec := httptest.NewRecorder()
+		srv.handleGetWebSession(rec, httptest.NewRequest(http.MethodGet, "/api/v1/web/session", nil))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+	})
+
+	t.Run("a session that no longer resolves gets the non-distinguishing 401", func(t *testing.T) {
+		srv, acct, _ := webSessionServerWithAccount(t, AccountRequest{Username: "gone-user", TenantID: "tenant-a"})
+		ctx := context.WithValue(context.Background(), principalContextKey, &Principal{ID: acct.ID, Name: acct.Username})
+		ctx = context.WithValue(ctx, webSessionIDContextKey, "no-such-session-id")
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/web/session", nil).WithContext(ctx)
+		rec := httptest.NewRecorder()
+		srv.handleGetWebSession(rec, req)
+		require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+		assert.Equal(t, "INVALID_SESSION_TOKEN", errCode(t, rec.Body.Bytes()))
+	})
+
+	t.Run("the body carries no permissions key and no session or CSRF token", func(t *testing.T) {
+		srv, _, cookie := webSessionServerWithAccount(t, AccountRequest{
+			Username: "perm-user", TenantID: "tenant-a", Permissions: []string{"steward:list"},
+		})
+		rec := getWebSessionEndpoint(srv, func(r *http.Request) { r.AddCookie(cookie) })
+		require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+
+		var env struct {
+			Data map[string]json.RawMessage `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &env))
+		keys := make([]string, 0, len(env.Data))
+		for k := range env.Data {
+			keys = append(keys, k)
+		}
+		assert.ElementsMatch(t, []string{"ok", "username", "tenant_id", "root_scope", "expires_at"}, keys)
+		assert.NotContains(t, env.Data, "permissions")
+
+		body := rec.Body.String()
+		assert.NotContains(t, body, cookie.Value, "the session token must not appear in the body")
+		assert.NotContains(t, body, "steward:list", "no permission may appear in the body")
+		assert.NotContains(t, body, "csrf")
+		assert.NotContains(t, body, "session_id")
+		for _, c := range rec.Result().Cookies() {
+			assert.NotEqual(t, cookieCSRFSession, c.Name, "a read must not mint a CSRF cookie")
+			assert.NotContains(t, body, c.Value, "no cookie value may appear in the body")
+		}
+	})
+}
+
+// webSessionIDFor resolves the server-side session ID behind a session cookie.
+func webSessionIDFor(t *testing.T, srv *Server, cookie *http.Cookie) string {
+	t.Helper()
+	sess, err := srv.webSessionManager.Validate(context.Background(), cookie.Value)
+	require.NoError(t, err)
+	return sess.ID
+}

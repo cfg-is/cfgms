@@ -8,11 +8,14 @@ import { MemoryRouter, Route, Routes } from 'react-router'
 import { AuthProvider, useAuth } from '../auth/AuthContext.tsx'
 import FleetOverview from '../fleet/FleetOverview.tsx'
 import AppShell from './AppShell.tsx'
+import { SESSION_PATH, sessionResponse, withSessionProbe } from '../test/sessionProbe.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', fetchMock)
+  // The provider restores the principal from GET /api/v1/web/session; the probe answers it
+  // (as a root operator) and passes every other request to fetchMock.
+  vi.stubGlobal('fetch', withSessionProbe(fetchMock))
   fetchMock.mockReset()
   // The fleet view (#2497) fetches its steward page on mount; the health tiles
   // (Issue #2729) also fetch on mount. Use mockImplementation to create a fresh
@@ -41,7 +44,7 @@ afterEach(() => {
  * AppShell provides search state via Outlet context, which FleetOverview
  * reads via useOutletContext.
  */
-function renderShell() {
+function mountShell() {
   return render(
     <MemoryRouter initialEntries={['/']}>
       <AuthProvider>
@@ -53,6 +56,13 @@ function renderShell() {
       </AuthProvider>
     </MemoryRouter>,
   )
+}
+
+/** Mounts the shell and waits for the restored principal to replace its loading state. */
+async function renderShell() {
+  const result = mountShell()
+  await screen.findByRole('navigation')
+  return result
 }
 
 describe('AppShell', () => {
@@ -67,7 +77,7 @@ describe('AppShell', () => {
             ),
       ),
     )
-    renderShell()
+    await renderShell()
     await waitFor(() =>
       expect(fetchMock.mock.calls.some(([u]) => String(u).startsWith('/api/v1/directory/'))).toBe(true),
     )
@@ -75,15 +85,15 @@ describe('AppShell', () => {
   })
 
   it('lists Directory with Users, Groups and Credentials links when access is granted', async () => {
-    renderShell()
+    await renderShell()
     expect(await screen.findByRole('link', { name: 'Directory' })).toBeTruthy()
     expect(screen.getByRole('link', { name: 'Users' }).getAttribute('href')).toBe('/directory/users')
     expect(screen.getByRole('link', { name: 'Groups' }).getAttribute('href')).toBe('/directory/groups')
     expect(screen.getByRole('link', { name: 'Credentials' }).getAttribute('href')).toBe('/directory/credentials')
   })
 
-  it('renders sidebar navigation with Fleet, Modules, Config, Workflows, Scripts, Registration, Reports, Audit, and Accounts as links', () => {
-    renderShell()
+  it('renders sidebar navigation with Fleet, Modules, Config, Workflows, Scripts, Registration, Reports, Audit, and Accounts as links', async () => {
+    await renderShell()
     expect(screen.getByRole('navigation')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /^fleet$/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /modules/i })).toBeInTheDocument()
@@ -96,27 +106,27 @@ describe('AppShell', () => {
     expect(screen.getByRole('link', { name: /accounts/i })).toBeInTheDocument()
   })
 
-  it('renders the Support access entry beside Tenants as a link to /support-access', () => {
-    renderShell()
+  it('renders the Support access entry beside Tenants as a link to /support-access', async () => {
+    await renderShell()
     expect(screen.getByRole('link', { name: /support access/i })).toHaveAttribute('href', '/support-access')
     expect(screen.getByRole('link', { name: /^tenants$/i })).toHaveAttribute('href', '/tenants')
   })
 
-  it('renders the Email delivery entry below Support access as a link to /email-delivery (Issue #6247)', () => {
-    renderShell()
+  it('renders the Email delivery entry below Support access as a link to /email-delivery (Issue #6247)', async () => {
+    await renderShell()
     const email = screen.getByRole('link', { name: /^email delivery$/i })
     expect(email).toHaveAttribute('href', '/email-delivery')
     const links = within(screen.getByRole('navigation')).getAllByRole('link')
     expect(links.indexOf(email)).toBe(links.indexOf(screen.getByRole('link', { name: /support access/i })) + 1)
   })
 
-  it('renders the Approvals entry as a link to /approvals (Issue #5450)', () => {
-    renderShell()
+  it('renders the Approvals entry as a link to /approvals (Issue #5450)', async () => {
+    await renderShell()
     expect(screen.getByRole('link', { name: /^approvals$/i })).toHaveAttribute('href', '/approvals')
   })
 
-  it('renders the Fleet query entry directly under Fleet as a link to /osquery (Issue #5460)', () => {
-    renderShell()
+  it('renders the Fleet query entry directly under Fleet as a link to /osquery (Issue #5460)', async () => {
+    await renderShell()
     const query = screen.getByRole('link', { name: /^fleet query$/i })
     expect(query).toHaveAttribute('href', '/osquery')
     const links = within(screen.getByRole('navigation')).getAllByRole('link')
@@ -124,34 +134,34 @@ describe('AppShell', () => {
     expect(links[fleetIndex + 1]).toBe(query)
   })
 
-  it('renders the Hyper-V profiles entry after Scripts as a link to /hyperv/profiles (Issue #5461)', () => {
-    renderShell()
+  it('renders the Hyper-V profiles entry after Scripts as a link to /hyperv/profiles (Issue #5461)', async () => {
+    await renderShell()
     const entry = screen.getByRole('link', { name: /^hyper-v profiles$/i })
     expect(entry).toHaveAttribute('href', '/hyperv/profiles')
     const links = within(screen.getByRole('navigation')).getAllByRole('link')
     expect(links[links.indexOf(screen.getByRole('link', { name: /^scripts$/i })) + 1]).toBe(entry)
   })
 
-  it('renders the API keys entry as a link to /api-keys (Issue #5441)', () => {
-    renderShell()
+  it('renders the API keys entry as a link to /api-keys (Issue #5441)', async () => {
+    await renderShell()
     expect(screen.getByRole('link', { name: /^api keys$/i })).toHaveAttribute('href', '/api-keys')
   })
 
-  it('renders the Automation grants entry as a link to /automation/grants (Issue #6035)', () => {
-    renderShell()
+  it('renders the Automation grants entry as a link to /automation/grants (Issue #6035)', async () => {
+    await renderShell()
     expect(screen.getByRole('link', { name: /^automation grants$/i })).toHaveAttribute(
       'href',
       '/automation/grants',
     )
   })
 
-  it('renders the Cluster nodes entry as a link to /cluster (Issue #5462)', () => {
-    renderShell()
+  it('renders the Cluster nodes entry as a link to /cluster (Issue #5462)', async () => {
+    await renderShell()
     expect(screen.getByRole('link', { name: /^cluster nodes$/i })).toHaveAttribute('href', '/cluster')
   })
 
-  it('all nav items are real links; no soon-tagged placeholders remain (Issue #2732, #2934, #2935)', () => {
-    renderShell()
+  it('all nav items are real links; no soon-tagged placeholders remain (Issue #2732, #2934, #2935)', async () => {
+    await renderShell()
     expect(screen.queryAllByText(/soon/i)).toHaveLength(0)
     expect(screen.getByRole('link', { name: /^fleet$/i })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: /modules/i })).toBeInTheDocument()
@@ -165,7 +175,7 @@ describe('AppShell', () => {
   })
 
   it('mounts the fleet overview (#2497) in the content area', async () => {
-    renderShell()
+    await renderShell()
     expect(
       screen.getByRole('heading', { name: 'Fleet', level: 1 }),
     ).toBeInTheDocument()
@@ -175,31 +185,31 @@ describe('AppShell', () => {
     expect(screen.getByRole('button', { name: /columns/i })).toBeInTheDocument()
   })
 
-  it('renders the tenant switcher, search, alert center, and user menu', () => {
-    renderShell()
+  it('renders the tenant switcher, search, alert center, and user menu', async () => {
+    await renderShell()
     expect(screen.getByRole('button', { name: /root/i })).toBeInTheDocument()
     expect(screen.getByRole('searchbox')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /notifications/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /account menu/i })).toBeInTheDocument()
   })
 
-  it('opens the mobile drawer via the hamburger button and shows a scrim', () => {
-    renderShell()
+  it('opens the mobile drawer via the hamburger button and shows a scrim', async () => {
+    await renderShell()
     const hamburger = screen.getByRole('button', { name: /open navigation/i })
     fireEvent.click(hamburger)
     expect(document.body.classList.contains('drawer')).toBe(true)
   })
 
-  it('closes the drawer on Escape', () => {
-    renderShell()
+  it('closes the drawer on Escape', async () => {
+    await renderShell()
     fireEvent.click(screen.getByRole('button', { name: /open navigation/i }))
     expect(document.body.classList.contains('drawer')).toBe(true)
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(document.body.classList.contains('drawer')).toBe(false)
   })
 
-  it('closes the drawer when the scrim is clicked', () => {
-    renderShell()
+  it('closes the drawer when the scrim is clicked', async () => {
+    await renderShell()
     fireEvent.click(screen.getByRole('button', { name: /open navigation/i }))
     fireEvent.click(screen.getByTestId('shell-scrim'))
     expect(document.body.classList.contains('drawer')).toBe(false)
@@ -244,6 +254,9 @@ describe('AppShell', () => {
   }
 
   function loginScopeMock(tenantId: string) {
+    // No session until login() succeeds: the provider's session read 401s, like every
+    // other call here, so the shell mounts only with the principal login returns.
+    vi.stubGlobal('fetch', withSessionProbe(fetchMock, null))
     vi.stubGlobal('navigator', {
       credentials: { get: vi.fn().mockResolvedValue(makePublicKeyCredential()) },
     })
@@ -354,6 +367,57 @@ describe('AppShell', () => {
   })
 })
 
+describe('AppShell — principal restore (Issue #6473)', () => {
+  /** Holds GET /api/v1/web/session open until the test releases it. */
+  function deferSession() {
+    let release!: (response: Response) => void
+    const pending = new Promise<Response>((resolve) => {
+      release = resolve
+    })
+    vi.stubGlobal('fetch', ((input: Parameters<typeof fetch>[0], init?: RequestInit) =>
+      String(input) === SESSION_PATH ? pending : fetchMock(input, init)) as typeof fetch)
+    return release
+  }
+
+  it('shows a loading state and makes no tenant-dependent request while the session read is pending', async () => {
+    const release = deferSession()
+    mountShell()
+
+    expect(await screen.findByTestId('shell-loading')).toBeInTheDocument()
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Fleet', level: 1 })).not.toBeInTheDocument()
+    // Give an effect that wrongly ran before the principal was known time to fire.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(fetchMock).not.toHaveBeenCalled()
+
+    release(sessionResponse())
+    expect(await screen.findByRole('navigation')).toBeInTheDocument()
+    expect(screen.queryByTestId('shell-loading')).not.toBeInTheDocument()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+  })
+
+  it('scopes the shell to the tenant the session read returns, never to root', async () => {
+    vi.stubGlobal(
+      'fetch',
+      withSessionProbe(fetchMock, { username: 'msp-user', tenant_id: 'msp-a', root_scope: false }),
+    )
+    mountShell()
+
+    const scopeButton = await screen.findByRole('button', { name: /msp-a/i })
+    expect(scopeButton).not.toHaveAccessibleName(/root/i)
+  })
+
+  it('stays on the loading state, not the root view, when the session cannot be read', async () => {
+    vi.stubGlobal('fetch', withSessionProbe(fetchMock, null))
+    mountShell()
+
+    expect(await screen.findByTestId('shell-loading')).toBeInTheDocument()
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.queryByRole('navigation')).not.toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+})
+
 describe('AppShell — elevation banner (Issue #4725)', () => {
   function routeFeed(items: unknown[]) {
     fetchMock.mockImplementation((input) => {
@@ -369,14 +433,19 @@ describe('AppShell — elevation banner (Issue #4725)', () => {
     routeFeed([
       { id: 'c-1', tenant_id: 'msp-a', kind: 'break_glass', principal_name: 'root-op', reason_category: 'security_incident', tenant_name: 'MSP A', expires_at: '2099-01-01T00:00:00Z' },
     ])
-    renderShell()
+    // A tenant-scoped session: a root session is not shown break-glass notices in the bell.
+    vi.stubGlobal(
+      'fetch',
+      withSessionProbe(fetchMock, { username: 'msp-user', tenant_id: 'msp-a', root_scope: false }),
+    )
+    await renderShell()
     expect(await screen.findByTestId('elevation-banner')).toHaveTextContent('root-op')
     expect(screen.getByTestId('alert-badge')).toHaveTextContent('1')
   })
 
   it('shows no banner for an empty feed', async () => {
     routeFeed([])
-    renderShell()
+    await renderShell()
     await screen.findByText(/no stewards enrolled yet/i)
     expect(screen.queryByTestId('elevation-banner')).not.toBeInTheDocument()
   })
