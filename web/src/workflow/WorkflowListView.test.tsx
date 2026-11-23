@@ -15,11 +15,12 @@ import { MemoryRouter } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import { TenantScopeProvider } from '../shell/TenantScopeContext.tsx'
 import WorkflowListView from './WorkflowListView.tsx'
+import { withSessionProbe } from '../test/sessionProbe.ts'
 
 const fetchMock = vi.fn<typeof fetch>()
 
 beforeEach(() => {
-  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('fetch', withSessionProbe(fetchMock))
   fetchMock.mockReset()
 })
 

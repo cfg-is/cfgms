@@ -237,13 +237,21 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		"username", logging.SanitizeLogValue(acct.Username),
 		"source_ip", logging.SanitizeLogValue(sourceIP))
 
-	s.writeResponse(w, http.StatusOK, PasskeyLoginFinishResponse{
+	s.writeResponse(w, http.StatusOK, s.webPrincipalResponse(r.Context(), acct, elevatedSess.AbsoluteExpiresAt))
+}
+
+// webPrincipalResponse builds the body that tells the web console who the signed-in
+// principal is. The passkey login finish response and GET /api/v1/web/session both
+// build it here, so a session read after a page reload carries exactly the values the
+// login response carried and the two cannot drift.
+func (s *Server) webPrincipalResponse(ctx context.Context, acct *account, expiresAt time.Time) PasskeyLoginFinishResponse {
+	return PasskeyLoginFinishResponse{
 		OK:        true,
 		Username:  acct.Username,
-		TenantID:  s.accountPrincipalTenant(r.Context(), acct),
+		TenantID:  s.accountPrincipalTenant(ctx, acct),
 		RootScope: acct.RootScope,
-		ExpiresAt: elevatedSess.AbsoluteExpiresAt,
-	})
+		ExpiresAt: expiresAt,
+	}
 }
 
 // takePendingPasskeyLogin binds the finish call to its begin call via the ceremony cookie,

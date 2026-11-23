@@ -8,10 +8,10 @@
  * storage (enforced by a source-scan test), never in a cookie readable by
  * JS. The one exception is the session's absolute expiry timestamp
  * (Story #4597): non-secret, informational, kept in sessionStorage so the
- * user menu can still show the time left after a reload. Session presence
- * is inferred from API responses; a page reload starts signedOut and the
- * first authenticated screen's data call re-establishes or expires the
- * session naturally.
+ * user menu can still show the time left after a reload. A page reload
+ * starts signedOut; on mount the provider reads the session's own principal
+ * from GET /api/v1/web/session, which restores principal, expiry and
+ * signedIn, or (401) leaves the user signed out.
  *
  * Step-up (Story #2786, ADR-021 Decision 6): when apiFetch receives a 401 +
  * WWW-Authenticate: CFGMS-StepUp, the onStepUpRequired listener fires and
@@ -35,6 +35,7 @@ import {
   type ReactNode,
 } from 'react'
 import {
+  fetchWebSession,
   passkeyLoginBeginRequest,
   passkeyLoginFinishRequest,
   logoutRequest,
@@ -193,6 +194,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // render (react-hooks/refs constraint).
   const probingRef = useRef(true)
   const sessionEstablishedRef = useRef(false)
+  // loginSucceededRef: an explicit login() succeeded, so a late result of the
+  // mount-time session read must not override it.
+  const loginSucceededRef = useRef(false)
   const [probing, setProbing] = useState(true)
 
   useEffect(() => {
@@ -230,7 +234,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setCrossingState({ request: req, resolve })
         }),
     )
+    // Restore the principal of an existing session (page reload, deep link).
+    // Through apiFetch: a plain 401 takes the session-expired path above, a
+    // valid session fires onSessionConfirmed.
+    let cancelled = false
+    function sessionUnconfirmed() {
+      // The session could not be read (server error, network failure, a body
+      // without a principal): never treat the caller as signed in without
+      // knowing who they are.
+      if (cancelled || loginSucceededRef.current) return
+      sessionEstablishedRef.current = false
+      probingRef.current = false
+      setProbing(false)
+      setPrincipal(null)
+      setStatus('signedOut')
+    }
+    fetchWebSession().then(
+      (result) => {
+        if (cancelled || loginSucceededRef.current) return
+        if (result.ok) {
+          sessionEstablishedRef.current = true
+          probingRef.current = false
+          setProbing(false)
+          setPrincipal({
+            username: result.username,
+            tenantId: result.tenantId,
+            rootScope: result.rootScope,
+            expiresAt: result.expiresAt,
+          })
+          setExpiresAt(result.expiresAt)
+          storeExpiry(result.expiresAt)
+          setStatus('signedIn')
+        } else if (result.status !== 401) {
+          sessionUnconfirmed()
+        }
+      },
+      sessionUnconfirmed,
+    )
     return () => {
+      cancelled = true
       onSessionExpired(null)
       onSessionConfirmed(null)
       onStepUpRequired(null)
@@ -292,6 +334,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const result = await passkeyLoginFinishRequest(toAssertionJSON(rawCred as PublicKeyCredential))
     if (result.ok) {
       sessionEstablishedRef.current = true
+      loginSucceededRef.current = true
       setPrincipal({
         username: result.username,
         tenantId: result.tenantId,
@@ -310,6 +353,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     await logoutRequest()
+    loginSucceededRef.current = false
     setPrincipal(null)
     setExpiresAt(null)
     storeExpiry(null)

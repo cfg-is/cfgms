@@ -4147,6 +4147,31 @@ Web accounts are browser-based admin principals authenticated via WebAuthn passk
 
 `expires_at` (RFC 3339) is the session's absolute expiry. The browser cannot read the HttpOnly session cookie, so this field is how the web UI shows the time remaining. It is informational only — the server enforces expiry. The body never contains the session or CSRF token.
 
+#### GET /api/v1/web/session
+
+Returns the principal behind the caller's own cookie web session. The web console calls it when it loads with an existing session (a page reload, or a deep link opened in a new tab) to restore the principal that the HttpOnly session cookie hides; until it answers, the console treats no one as the root operator.
+
+The response is the same body as the passkey login finish response above, built by the same code, so the two carry identical values for a session: `tenant_id` is the account's tenant (the root tenant for a root-scope account), `root_scope` is the account's explicit root grant, and `expires_at` is the session's absolute expiry.
+
+```json
+{
+  "data": {
+    "ok": true,
+    "username": "admin@msp-a",
+    "tenant_id": "root/msp-a",
+    "root_scope": false,
+    "expires_at": "2026-10-08T04:00:00Z"
+  }
+}
+```
+
+**Auth:** an authenticated `/api/v1` route that accepts only a cookie web session. Any signed-in web session may read its own principal: there is no permission requirement and no minimum assurance. It has no side effects and needs no CSRF header (a `GET`). The body never contains a permission list, a session identifier or a CSRF token.
+
+**Errors:**
+- `401` — no valid session cookie (the authentication middleware's response).
+- `401` `SESSION_REQUIRED` — the caller authenticated with an API key, an mTLS certificate or a Bearer session instead of the web session cookie. No principal is synthesised for it.
+- `401` `INVALID_SESSION_TOKEN` — the session or its account no longer resolves; the body does not say which.
+
 #### Tenant scope
 
 Each web account has exactly one of:

@@ -2105,6 +2105,56 @@ paths:
         '401':
           description: Assertion rejected
 
+  /web/session:
+    get:
+      summary: Read the signed-in web session's own principal
+      description: |
+        Returns the principal behind the caller's cookie web session, in the same
+        shape and with the same values as the passkey login finish response. The
+        web console calls it after a page reload or when a deep link is opened, to
+        restore the principal the HttpOnly session cookie otherwise hides.
+
+        Authenticated like every `/api/v1` route; a cookie session at any
+        assurance level may read its own identity, so there is no permission
+        requirement. Read-only: the body carries no permission list and no
+        session or CSRF identifier. A caller that is not a cookie web session
+        (API key, mTLS certificate, Bearer session) is refused with
+        `401 SESSION_REQUIRED` rather than answered with a synthesised principal.
+      operationId: getWebSession
+      tags:
+        - Web Login
+      security:
+        - BrowserSession: []
+      responses:
+        '200':
+          description: The session's principal
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      ok:
+                        type: boolean
+                      username:
+                        type: string
+                      tenant_id:
+                        type: string
+                        description: The tenant the account is bound to (the root tenant for a root-scope account).
+                      root_scope:
+                        type: boolean
+                      expires_at:
+                        type: string
+                        format: date-time
+                        description: The session's absolute expiry (RFC 3339).
+        '401':
+          description: |
+            No valid session (the authentication middleware's response), a caller
+            that is not a cookie web session (`SESSION_REQUIRED`), or a session or
+            account that no longer resolves (`INVALID_SESSION_TOKEN`).
+
   /accounts/{username}/webauthn/credentials:
     get:
       summary: List an account's passkeys

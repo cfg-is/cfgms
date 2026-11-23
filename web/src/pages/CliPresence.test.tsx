@@ -20,6 +20,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { AuthProvider } from '../auth/AuthContext.tsx'
 import CliPresence from './CliPresence.tsx'
+import { withSessionProbe } from '../test/sessionProbe.ts'
 
 function jsonResponse(status: number, body: unknown = {}): Response {
   return new Response(status === 204 ? null : JSON.stringify(body), {
@@ -111,7 +112,7 @@ function mockEndpoints(opts: {
 
 beforeEach(() => {
   fetchMock.mockReset()
-  vi.stubGlobal('fetch', fetchMock)
+  vi.stubGlobal('fetch', withSessionProbe(fetchMock))
   window.localStorage.clear()
   window.sessionStorage.clear()
 })
@@ -165,6 +166,8 @@ describe('URL parameter handling', () => {
 
 describe('authentication gate', () => {
   it('shows the passkey login ceremony first when no session is present', async () => {
+    // A session-less visitor: the provider's session read 401s along with every other call.
+    vi.stubGlobal('fetch', fetchMock)
     fetchMock.mockResolvedValue(jsonResponse(401))
     renderCliPresence()
     await waitFor(() =>
@@ -174,6 +177,8 @@ describe('authentication gate', () => {
   })
 
   it('shows the bound action and code after a completed passkey login', async () => {
+    // A session-less visitor: the provider's session read 401s along with every other call.
+    vi.stubGlobal('fetch', fetchMock)
     let loggedIn = false
     fetchMock.mockImplementation((input, init) => {
       const url = String(input)
