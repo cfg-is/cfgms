@@ -16,4 +16,14 @@
 // whenever any other handle to the destination is open.
 //
 // AtomicReplace does not remove src on failure; the caller does.
+//
+// LockFile takes an exclusive cross-process advisory lock on a lock file:
+// flock(2) on Unix, LockFileEx on Windows. It opens the file (creating it with
+// mode 0600 if missing) and never deletes it, because unlinking a lock file that
+// another process has open would split the lock across two inodes. The kernel
+// releases the lock when the holder exits, so a crashed holder never leaves a
+// stale lock behind. The lock is retried without blocking until the context
+// ends, so a cancelled or expired context returns ctx.Err() and takes nothing.
+// The returned unlock function unlocks and closes the file and is safe to call
+// more than once.
 package atomicfile
