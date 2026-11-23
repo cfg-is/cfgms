@@ -5,9 +5,44 @@ package package_module
 import (
 	"context"
 	"fmt"
-	"os/exec"
 	"strings"
 )
+
+// Homebrew install locations. The steward never resolves brew through PATH:
+// the Apple silicon prefix is not on launchd's default PATH and module
+// processes inherit a minimal environment, so the binary is located by its
+// fixed per-architecture path.
+const (
+	brewBinArm64  = "/opt/homebrew/bin/brew"
+	brewRepoArm64 = "/opt/homebrew"
+	brewBinAmd64  = "/usr/local/bin/brew"
+	// On Intel /usr/local itself is root-owned; the Homebrew repository
+	// directory is the one the installing user owns.
+	brewRepoAmd64 = "/usr/local/Homebrew"
+)
+
+// brewLocation is where Homebrew lives for one architecture.
+type brewLocation struct {
+	// BinPath is the fixed path of the brew executable (a symlink into the
+	// repository on both architectures).
+	BinPath string
+	// RepoDir is the Homebrew repository directory whose owner is the
+	// prefix owner brew runs as.
+	RepoDir string
+}
+
+// brewLocationFor returns the fixed Homebrew locations for goarch. It is pure
+// so both architectures are testable on any host.
+func brewLocationFor(goarch string) (brewLocation, error) {
+	switch goarch {
+	case "arm64":
+		return brewLocation{BinPath: brewBinArm64, RepoDir: brewRepoArm64}, nil
+	case "amd64":
+		return brewLocation{BinPath: brewBinAmd64, RepoDir: brewRepoAmd64}, nil
+	default:
+		return brewLocation{}, fmt.Errorf("homebrew: unsupported architecture %q (supported: arm64, amd64)", goarch)
+	}
+}
 
 // homebrewManager implements PackageManager for Homebrew
 type homebrewManager struct{}
@@ -26,7 +61,10 @@ func (m *homebrewManager) Install(ctx context.Context, name, version string) err
 	}
 	// #nosec G204 -- Configure validates the package name and rejects leading
 	// dashes; the name is one argv to the fixed brew executable without a shell.
-	cmd := exec.CommandContext(ctx, "brew", "install", name)
+	cmd, err := newBrewCmd(ctx, "install", name)
+	if err != nil {
+		return err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to install package %s: %w\nOutput: %s", name, err, string(output))
@@ -37,7 +75,10 @@ func (m *homebrewManager) Install(ctx context.Context, name, version string) err
 func (m *homebrewManager) Remove(ctx context.Context, name string) error {
 	// #nosec G204 -- name passed validatePackageName (including leading-dash
 	// rejection) and is a single argv to the fixed brew executable.
-	cmd := exec.CommandContext(ctx, "brew", "uninstall", name)
+	cmd, err := newBrewCmd(ctx, "uninstall", name)
+	if err != nil {
+		return err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to remove package %s: %w\nOutput: %s", name, err, string(output))
@@ -48,7 +89,10 @@ func (m *homebrewManager) Remove(ctx context.Context, name string) error {
 func (m *homebrewManager) GetInstalledVersion(ctx context.Context, name string) (string, error) {
 	// #nosec G204 -- the fixed brew command receives a validated package name as
 	// one argv; no shell parsing occurs.
-	cmd := exec.CommandContext(ctx, "brew", "list", "--versions", name)
+	cmd, err := newBrewCmd(ctx, "list", "--versions", name)
+	if err != nil {
+		return "", err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("failed to get version for package %s: %w\nOutput: %s", name, err, string(output))
@@ -64,7 +108,10 @@ func (m *homebrewManager) GetInstalledVersion(ctx context.Context, name string) 
 }
 
 func (m *homebrewManager) ListInstalled(ctx context.Context) (map[string]string, error) {
-	cmd := exec.CommandContext(ctx, "brew", "list", "--versions")
+	cmd, err := newBrewCmd(ctx, "list", "--versions")
+	if err != nil {
+		return nil, err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list installed packages: %w\nOutput: %s", err, string(output))
@@ -89,7 +136,10 @@ func (m *homebrewManager) ListInstalled(ctx context.Context) (map[string]string,
 func (m *homebrewManager) GetVersion(ctx context.Context, name string) (string, error) {
 	// #nosec G204 -- the fixed brew command receives a validated package name as
 	// one argv; no shell parsing occurs.
-	cmd := exec.CommandContext(ctx, "brew", "list", "--versions", name)
+	cmd, err := newBrewCmd(ctx, "list", "--versions", name)
+	if err != nil {
+		return "", err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("brew list failed: %v, output: %s", err, string(output))
@@ -111,7 +161,10 @@ func (m *homebrewManager) GetVersion(ctx context.Context, name string) (string, 
 func (m *homebrewManager) IsInstalled(ctx context.Context, name string) (bool, error) {
 	// #nosec G204 -- name is validated before manager dispatch and is passed as
 	// one argv to the fixed brew executable.
-	cmd := exec.CommandContext(ctx, "brew", "list", name)
+	cmd, err := newBrewCmd(ctx, "list", name)
+	if err != nil {
+		return false, err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		// If the error is "No such keg", the package is not installed
@@ -126,7 +179,10 @@ func (m *homebrewManager) IsInstalled(ctx context.Context, name string) (bool, e
 func (m *homebrewManager) Update(ctx context.Context, name string) error {
 	// #nosec G204 -- name is validated before manager dispatch and is passed as
 	// one argv to the fixed brew executable.
-	cmd := exec.CommandContext(ctx, "brew", "upgrade", name)
+	cmd, err := newBrewCmd(ctx, "upgrade", name)
+	if err != nil {
+		return err
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("brew upgrade failed: %v, output: %s", err, string(output))

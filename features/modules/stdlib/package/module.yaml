@@ -37,6 +37,13 @@ observe_when:
   - fact: os
     equals: darwin
 
+# macOS Homebrew is run as the owner of its prefix (never as root) from fixed
+# paths; every other provider is unchanged.
+behavioral_envelope:
+  shells_out_to:
+    - "/opt/homebrew/bin/brew"   # macOS Homebrew, Apple silicon
+    - "/usr/local/bin/brew"      # macOS Homebrew, Intel
+
 security:
   requires_root: true
   capabilities: []
