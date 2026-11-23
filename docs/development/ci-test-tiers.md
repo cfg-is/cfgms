@@ -215,6 +215,19 @@ A skipped macOS leg would also skip the darwin test build of closure-reachable c
 `macos-test-compile` (`make test-macos-compile`) compiles and links every macOS-shipped test binary for `darwin/arm64`
 without running it, on every code PR. `build-gate-pr-stub` needs it and accepts `skipped` only on a docs-only PR.
 
+**Live root-to-owner job (PR side, current state, Issue #6464).** The eight macOS legs run as the non-root runner user, so the
+`package` module's switch from root to the Homebrew prefix owner (Issue #6459) never executes in them. The separate job
+`macos-brew-live` is not a unit-test leg and is not part of the count of eight. It runs on `macos-latest` under the same
+trigger (`changes.outputs.macos == 'true'`). It builds the test binary as the runner user (`go test -c -tags brewlive`, so the
+Go module and build caches stay runner-owned) and then runs only that binary under `sudo`, restricted with `-test.run` to
+`TestBrewLiveRunsAsPrefixOwner` in `features/modules/stdlib/package/brew_live_darwin_test.go`. Started as root, the test uses the
+real provider from `newHomebrewManager()` to install, list and remove the `hello` formula, then asserts the keg directory and every
+entry under it belong to the owner of the Homebrew repository directory and not to root. It fails rather than skips when it is
+not root, when `brew` is missing at its fixed path, or when `hello` is already installed. The `brewlive` build tag keeps the file
+out of `golangci-lint` and `make test-macos-compile`. `build-gate-pr-stub` judges the job with its own
+`scripts/macos-gate-rule.sh` call (same skip rule as the legs), and `test_build_gate_requires_macos_brew_live` in
+`scripts/test-scripts.sh` asserts the wiring.
+
 **Queue Linux native build (current state).** `cross-platform-build.yml` runs one `native-builds` job, `Native Build (Linux)`,
 on `merge_group` and `workflow_dispatch`: `make build`, `make test-framework-api-sharded` and
 `make test-go-group-controller-core` against the merge commit. It no longer runs `make test-go-group-heavy-providers`
