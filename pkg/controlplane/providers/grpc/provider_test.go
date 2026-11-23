@@ -535,6 +535,13 @@ func TestCapabilitiesLateDeclarationMovesFloorToDeclaredOnce(t *testing.T) {
 	requireSettled(t, env.conn)
 	require.Equal(t, registry.CapabilityFloor, env.conn.CapabilitySnapshot().State)
 
+	// The grace goroutine settles floor in memory before it submits the durable
+	// floor write. Send the declaration only once that write has landed, so it is a
+	// real floor to declared move in the durable record.
+	require.Eventually(t, func() bool {
+		return assert.ObjectsAreEqual([]string{"reset:pending", "declare:floor"}, rec.states())
+	}, 5*time.Second, 10*time.Millisecond, "durable floor write must land before the late declaration")
+
 	local := LocalCapabilities("steward-cap-late")
 	require.NoError(t, env.client.SendCapabilities(context.Background(), &local))
 	require.Eventually(t, func() bool {
