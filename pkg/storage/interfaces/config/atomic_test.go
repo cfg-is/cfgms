@@ -227,8 +227,27 @@ func TestAtomicLock_DirectoryModeAndLocation(t *testing.T) {
 	}
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
-	assert.Empty(t, entries, "lock files are released")
+	// The lock file persists across acquires: it is never created or deleted per
+	// acquire, so exactly one <sha256>.lock remains for the one key.
+	require.Len(t, entries, 1, "one persistent lock file per key")
+	name := entries[0].Name()
+	assert.Regexp(t, `^[0-9a-f]{64}\.lock$`, name)
+	if runtime.GOOS != "windows" {
+		fi, statErr := os.Stat(filepath.Join(dir, name))
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o600), fi.Mode().Perm())
+	}
 	assert.True(t, strings.HasPrefix(dir, root))
+
+	// The persisted lock file is not left held: another update on the key succeeds.
+	require.NoError(t, cfgconfig.AtomicUpdate(context.Background(), store, key,
+		func(cur *cfgconfig.ConfigEntry) (*cfgconfig.ConfigEntry, error) {
+			require.NotNil(t, cur)
+			return &cfgconfig.ConfigEntry{Key: key, Data: []byte("y"), Format: cfgconfig.ConfigFormatJSON}, nil
+		}))
+	entries, err = os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
 }
 
 // A store without a conditional write and without a private directory cannot be

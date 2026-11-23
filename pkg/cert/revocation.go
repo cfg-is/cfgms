@@ -18,6 +18,7 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/cfgis/cfgms/pkg/atomicfile"
 	certinterfaces "github.com/cfgis/cfgms/pkg/cert/interfaces"
 )
 
@@ -102,9 +103,9 @@ func (rs *revocationStore) addAndPersist(entry RevocationEntry) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 
-	unlock, err := lockRevocationFile(filepath.Join(filepath.Dir(rs.filePath), revocationLockFileName))
+	unlock, err := atomicfile.LockFile(context.Background(), filepath.Join(filepath.Dir(rs.filePath), revocationLockFileName))
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to lock revocation list: %w", err)
 	}
 	defer unlock()
 
