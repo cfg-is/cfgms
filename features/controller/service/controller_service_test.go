@@ -2155,3 +2155,98 @@ func TestEnsureSteward_TamperedRecordKeepsStatus(t *testing.T) {
 		assert.Equal(t, business.StewardStatusTampered, durable())
 	})
 }
+
+// TestListFleetStewards_NotLiveStewardCarriesDurableVersion proves the version
+// reaches the fleet list for a steward attached to a peer node: it has a durable
+// StewardRecord but no entry in this node's live registry, so the durable
+// record is the only source. A live steward keeps its in-memory heartbeat
+// version even when the durable record disagrees.
+func TestListFleetStewards_NotLiveStewardCarriesDurableVersion(t *testing.T) {
+	ctx := context.Background()
+	store := pkgtesting.SetupTestStorage(t).GetStewardStore()
+	require.NotNil(t, store)
+
+	now := time.Now().UTC()
+	require.NoError(t, store.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "dev-peer", TenantID: "tenant-a", Status: business.StewardStatusActive,
+		RegisteredAt: now, Version: "v1.2.3",
+	}))
+	require.NoError(t, store.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "dev-live", TenantID: "tenant-a", Status: business.StewardStatusActive,
+		RegisteredAt: now, Version: "v0.0.1-durable",
+	}))
+	require.NoError(t, store.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "dev-nover", TenantID: "tenant-a", Status: business.StewardStatusRegistered,
+		RegisteredAt: now,
+	}))
+
+	svc := NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(store)
+	svc.mu.Lock()
+	svc.stewards["dev-live"] = &StewardInfo{
+		ID: "dev-live", TenantID: "tenant-a", Status: "active",
+		Version: "v9.9.9-heartbeat", Metrics: map[string]string{},
+	}
+	svc.mu.Unlock()
+
+	byID := make(map[string]*StewardInfo)
+	for _, info := range svc.ListFleetStewards(ctxkeys.WithSystem(ctx)) {
+		byID[info.ID] = info
+	}
+	require.Contains(t, byID, "dev-peer")
+	require.Contains(t, byID, "dev-live")
+	require.Contains(t, byID, "dev-nover")
+
+	assert.Equal(t, "v1.2.3", byID["dev-peer"].Version,
+		"a steward with no live entry must carry the durable record's version")
+	assert.Equal(t, "v9.9.9-heartbeat", byID["dev-live"].Version,
+		"a live steward keeps its in-memory heartbeat version")
+	assert.Empty(t, byID["dev-nover"].Version,
+		"a record that never reported a version stays empty rather than inventing one")
+}
+
+// TestFleetDNAAttributes_InjectsVersionWithoutOverridingFragment covers the
+// shared fleet-attribute builder: the version comes from StewardInfo.Version
+// only when present and never replaces a value a fragment already supplied.
+func TestFleetDNAAttributes_InjectsVersionWithoutOverridingFragment(t *testing.T) {
+	dna := makeTestDNA("dev-1", map[string]string{"os": "linux", "hostname": "h1"})
+
+	t.Run("version injected when absent", func(t *testing.T) {
+		attrs := FleetDNAAttributes(&StewardInfo{ID: "dev-1", DNA: dna, Version: "v1.2.3"}, nil)
+		assert.Equal(t, "v1.2.3", attrs[FleetVersionAttr])
+		assert.Equal(t, "linux", attrs["os"], "flattened fragments are kept")
+		assert.Equal(t, "h1", attrs["hostname"])
+	})
+
+	t.Run("empty version adds no key", func(t *testing.T) {
+		attrs := FleetDNAAttributes(&StewardInfo{ID: "dev-1", DNA: dna}, nil)
+		assert.NotContains(t, attrs, FleetVersionAttr)
+		assert.Equal(t, "linux", attrs["os"])
+	})
+
+	t.Run("fragment-supplied version is not overwritten", func(t *testing.T) {
+		withVer := makeTestDNA("dev-1", map[string]string{"os": "linux", FleetVersionAttr: "v-from-fragment"})
+		attrs := FleetDNAAttributes(&StewardInfo{ID: "dev-1", DNA: withVer, Version: "v1.2.3"}, nil)
+		assert.Equal(t, "v-from-fragment", attrs[FleetVersionAttr])
+	})
+
+	t.Run("controller tags merged alongside the version", func(t *testing.T) {
+		attrs := FleetDNAAttributes(&StewardInfo{ID: "dev-1", DNA: dna, Version: "v1.2.3"}, []string{"prod", "web"})
+		assert.Equal(t, "prod,web", attrs["tags"])
+		assert.Equal(t, "v1.2.3", attrs[FleetVersionAttr])
+	})
+
+	t.Run("no DNA yet still reports the version", func(t *testing.T) {
+		attrs := FleetDNAAttributes(&StewardInfo{ID: "dev-1", Version: "v1.2.3"}, nil)
+		assert.Equal(t, map[string]string{FleetVersionAttr: "v1.2.3"}, attrs)
+		assert.Nil(t, FleetDNAAttributes(&StewardInfo{ID: "dev-1"}, nil), "nothing to report yields nil")
+		assert.Nil(t, FleetDNAAttributes(nil, nil))
+	})
+
+	t.Run("repeated calls return independent maps", func(t *testing.T) {
+		info := &StewardInfo{ID: "dev-1", DNA: dna, Version: "v1.2.3"}
+		first := FleetDNAAttributes(info, nil)
+		first[FleetVersionAttr] = "mutated"
+		assert.Equal(t, "v1.2.3", FleetDNAAttributes(info, nil)[FleetVersionAttr])
+	})
+}

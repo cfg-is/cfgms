@@ -6788,16 +6788,12 @@ func (p *serverFleetStewardProvider) GetAllStewards() []controllerFleet.StewardD
 	infos := p.svc.ListFleetStewards(ctxkeys.WithSystem(context.Background()))
 	result := make([]controllerFleet.StewardData, 0, len(infos))
 	for _, info := range infos {
-		var attrs map[string]string
 		var frags []*common.Fragment
 		if info.DNA != nil {
-			attrs = service.FlattenDNAFragments(info.DNA.Fragments)
 			frags = info.DNA.Fragments
 		}
 		// ListFleetStewards already merges controller-stored tags into info.Tags.
-		if len(info.Tags) > 0 {
-			attrs = service.MergeControllerTags(attrs, info.Tags)
-		}
+		attrs := service.FleetDNAAttributes(info, info.Tags)
 		result = append(result, controllerFleet.StewardData{
 			ID:            info.ID,
 			TenantID:      info.TenantID,

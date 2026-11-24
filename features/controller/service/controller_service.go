@@ -1828,39 +1828,7 @@ func (s *ControllerService) ListFleetStewards(ctx context.Context) []*StewardInf
 	// cannot be read at all, a dna_history tenant is not evidence of anything —
 	// dna_history is never rewritten on a tenant move, so it names the device's
 	// old tenant forever (Issue #3494 security review).
-	var tenantMap map[string]string
-	tenantMapReadable := false
-	var deviceIDs []string
-	if s.dnaStorage != nil {
-		tm, tenantErr := s.dnaStorage.ListDeviceTenants(ctx)
-		if tenantErr != nil {
-			s.logger.Warn("ListFleetStewards: failed to list device tenants; durable tenant resolution limited to the fleet registry",
-				"error", logging.SanitizeLogValue(tenantErr.Error()))
-		} else {
-			tenantMap = tm
-			tenantMapReadable = true
-		}
-
-		ids, idsErr := s.dnaStorage.ListAllDeviceIDs(ctx)
-		if idsErr != nil {
-			s.logger.Warn("ListFleetStewards: failed to list device IDs",
-				"error", logging.SanitizeLogValue(idsErr.Error()))
-		} else {
-			deviceIDs = ids
-		}
-	}
-
-	// Load all stewards from the durable fleet registry.
-	var stewardStoreRecords []*business.StewardRecord
-	if s.stewardStore != nil {
-		recs, listErr := s.stewardStore.ListStewards(ctx)
-		if listErr != nil {
-			s.logger.Warn("ListFleetStewards: failed to list stewards from durable store",
-				"error", logging.SanitizeLogValue(listErr.Error()))
-		} else {
-			stewardStoreRecords = recs
-		}
-	}
+	tenantMap, tenantMapReadable, deviceIDs, stewardStoreRecords := s.loadFleetSources(ctx)
 
 	// Build the union of all known device IDs across every source.
 	allDevices := make(map[string]struct{})
@@ -1890,14 +1858,7 @@ func (s *ControllerService) ListFleetStewards(ctx context.Context) []*StewardInf
 				continue
 			}
 			entry := *live
-			if s.tagStore != nil {
-				tags := s.tagStore.TagsFor(deviceID)
-				if len(tags) > 0 {
-					tagsCopy := make([]string, len(tags))
-					copy(tagsCopy, tags)
-					entry.Tags = tagsCopy
-				}
-			}
+			entry.Tags = s.fleetTagsCopy(deviceID, entry.Tags)
 			result = append(result, &entry)
 			continue
 		}
@@ -1909,24 +1870,9 @@ func (s *ControllerService) ListFleetStewards(ctx context.Context) []*StewardInf
 			tenantID = tenantMap[deviceID]
 		}
 
-		var dna *common.DNA
-		var storedAt time.Time
-		var status string
-		var dnaRecordTenant string
+		var version string
 
-		if s.dnaStorage != nil {
-			record, err := s.dnaStorage.GetLatestByDeviceID(ctx, deviceID)
-			if err != nil {
-				s.logger.Warn("ListFleetStewards: failed to load DNA for device; reporting an empty DNA stub for this call",
-					"device_id", logging.SanitizeLogValue(deviceID),
-					"error", logging.SanitizeLogValue(err.Error()))
-			} else if record != nil {
-				dna = record.DNA
-				storedAt = record.StoredAt
-				status = record.Status
-				dnaRecordTenant = record.TenantID
-			}
-		}
+		dna, storedAt, status, dnaRecordTenant := s.latestDNAForFleet(ctx, deviceID)
 
 		// Merge StewardStore data: lifecycle status and tenant are authoritative
 		// sources for enrolled stewards (Issue #3403). The fleet registry is
@@ -1939,6 +1885,9 @@ func (s *ControllerService) ListFleetStewards(ctx context.Context) []*StewardInf
 			if sr.Status != "" {
 				status = string(sr.Status)
 			}
+			// The durable record carries the version persistHeartbeat wrote; a
+			// steward attached to a peer node has no live entry on this node.
+			version = sr.Version
 			if storedAt.IsZero() {
 				storedAt = sr.RegisteredAt
 			}
@@ -1974,20 +1923,119 @@ func (s *ControllerService) ListFleetStewards(ctx context.Context) []*StewardInf
 			DNA:           dna,
 			LastHeartbeat: storedAt,
 			Status:        status,
+			Version:       version,
 			Metrics:       make(map[string]string),
 		}
-		if s.tagStore != nil {
-			tags := s.tagStore.TagsFor(deviceID)
-			if len(tags) > 0 {
-				tagsCopy := make([]string, len(tags))
-				copy(tagsCopy, tags)
-				entry.Tags = tagsCopy
-			}
-		}
+		entry.Tags = s.fleetTagsCopy(deviceID, entry.Tags)
 		result = append(result, entry)
 	}
 
 	return result
+}
+
+// loadFleetSources reads the durable sources ListFleetStewards unions: the
+// device_tenant mapping, the DNA history device IDs and the steward store. A
+// source that fails to read is logged and contributes nothing; tenantMapReadable
+// reports whether the device_tenant mapping was actually read.
+func (s *ControllerService) loadFleetSources(ctx context.Context) (tenantMap map[string]string, tenantMapReadable bool, deviceIDs []string, records []*business.StewardRecord) {
+	if s.dnaStorage != nil {
+		tm, tenantErr := s.dnaStorage.ListDeviceTenants(ctx)
+		if tenantErr != nil {
+			s.logger.Warn("ListFleetStewards: failed to list device tenants; durable tenant resolution limited to the fleet registry",
+				"error", logging.SanitizeLogValue(tenantErr.Error()))
+		} else {
+			tenantMap = tm
+			tenantMapReadable = true
+		}
+
+		ids, idsErr := s.dnaStorage.ListAllDeviceIDs(ctx)
+		if idsErr != nil {
+			s.logger.Warn("ListFleetStewards: failed to list device IDs",
+				"error", logging.SanitizeLogValue(idsErr.Error()))
+		} else {
+			deviceIDs = ids
+		}
+	}
+
+	// Load all stewards from the durable fleet registry.
+	if s.stewardStore != nil {
+		recs, listErr := s.stewardStore.ListStewards(ctx)
+		if listErr != nil {
+			s.logger.Warn("ListFleetStewards: failed to list stewards from durable store",
+				"error", logging.SanitizeLogValue(listErr.Error()))
+		} else {
+			records = recs
+		}
+	}
+	return tenantMap, tenantMapReadable, deviceIDs, records
+}
+
+// latestDNAForFleet loads the newest stored DNA record for deviceID. A read
+// failure is logged and yields nil DNA so the caller reports an empty stub for
+// this call rather than a stale cached copy.
+func (s *ControllerService) latestDNAForFleet(ctx context.Context, deviceID string) (dna *common.DNA, storedAt time.Time, status, recordTenant string) {
+	if s.dnaStorage == nil {
+		return nil, time.Time{}, "", ""
+	}
+	record, err := s.dnaStorage.GetLatestByDeviceID(ctx, deviceID)
+	if err != nil {
+		s.logger.Warn("ListFleetStewards: failed to load DNA for device; reporting an empty DNA stub for this call",
+			"device_id", logging.SanitizeLogValue(deviceID),
+			"error", logging.SanitizeLogValue(err.Error()))
+		return nil, time.Time{}, "", ""
+	}
+	if record == nil {
+		return nil, time.Time{}, "", ""
+	}
+	return record.DNA, record.StoredAt, record.Status, record.TenantID
+}
+
+// fleetTagsCopy returns a copy of the controller-side tags for deviceID, or
+// current unchanged when there is no tag store or the device has no tags.
+func (s *ControllerService) fleetTagsCopy(deviceID string, current []string) []string {
+	if s.tagStore == nil {
+		return current
+	}
+	tags := s.tagStore.TagsFor(deviceID)
+	if len(tags) == 0 {
+		return current
+	}
+	tagsCopy := make([]string, len(tags))
+	copy(tagsCopy, tags)
+	return tagsCopy
+}
+
+// FleetVersionAttr is the fleet-index attribute that carries a steward's
+// running version.
+const FleetVersionAttr = "steward.version"
+
+// FleetDNAAttributes builds the attribute map the fleet index serves for a
+// steward: the flattened DNA fragments, ctrlTags merged into "tags", and
+// "steward.version" set from info.Version when that is non-empty and no
+// fragment already supplied the key. The steward never publishes its version
+// in a fragment, so StewardInfo.Version (heartbeat, or the durable record) is
+// the single source for the fleet view's running version. The returned map is
+// fresh on every call (nil only when there is nothing to report).
+func FleetDNAAttributes(info *StewardInfo, ctrlTags []string) map[string]string {
+	if info == nil {
+		return nil
+	}
+	var attrs map[string]string
+	if info.DNA != nil {
+		attrs = FlattenDNAFragments(info.DNA.Fragments)
+	}
+	if len(ctrlTags) > 0 {
+		attrs = MergeControllerTags(attrs, ctrlTags)
+	}
+	if info.Version != "" {
+		if _, ok := attrs[FleetVersionAttr]; !ok {
+			if attrs == nil {
+				attrs = make(map[string]string, 1)
+			}
+			attrs[FleetVersionAttr] = info.Version
+		}
+	}
+	return attrs
 }
 
 // --- Steward capability record (Issue #6310) ---
