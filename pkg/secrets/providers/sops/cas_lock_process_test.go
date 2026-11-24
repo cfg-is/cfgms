@@ -6,6 +6,7 @@ package sops
 import (
 	"bufio"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -33,7 +34,7 @@ const (
 // set to "increment" or "hold".
 //
 //	increment  performs CFGMS_CAS_LOCK_COUNT increments of the counter file.
-//	hold       prints HOLDING while holding the lock, then blocks until killed.
+//	hold       prints HOLDING while holding the lock, then blocks on stdin until killed.
 func TestCASLockHelperProcess(t *testing.T) {
 	mode := os.Getenv(casHelperEnv)
 	if mode == "" {
@@ -70,7 +71,13 @@ func TestCASLockHelperProcess(t *testing.T) {
 			fail(3, "acquire: "+err.Error())
 		}
 		_, _ = os.Stdout.WriteString(casHelperHolding + "\n")
-		select {} // hold the lock until the parent kills this process
+		// Hold the lock until the parent ends this process. A blocking read on
+		// stdin keeps the process alive without tripping the Go runtime's
+		// "all goroutines are asleep" detector, which an empty select does on
+		// darwin. The parent keeps the write end open until cleanup; EOF means
+		// the parent is done, so the child exits and the OS drops the lock.
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
 	default:
 		os.Exit(2)
 	}
@@ -109,8 +116,11 @@ func startHoldingHelper(t *testing.T, dir string) *exec.Cmd {
 	child := spawnCASLockHelper(t, "hold", dir, "", 0)
 	stdout, err := child.StdoutPipe()
 	require.NoError(t, err)
+	stdin, err := child.StdinPipe()
+	require.NoError(t, err)
 	require.NoError(t, child.Start())
 	t.Cleanup(func() {
+		_ = stdin.Close()
 		_ = child.Process.Kill()
 		_ = child.Wait()
 	})
