@@ -1653,7 +1653,7 @@ func TestTriggers_RecordOwner(t *testing.T) {
 	assert.Equal(t, "carol", got.UpdatedBy)
 	require.NoError(t, h.manager.EnableTrigger(updaterCtx, "owned-1"))
 
-	// Reload from the store with a fresh manager (simulated restart).
+	// Reload from the store with a fresh manager, as after a restart.
 	reloaded := &TriggerManagerImpl{
 		logger:       logging.ForModule("workflow.trigger.manager.test"),
 		triggerStore: h.triggerStore,
