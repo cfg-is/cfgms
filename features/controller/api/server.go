@@ -1802,6 +1802,15 @@ func (s *Server) SetDataProvider(dp reportinterfaces.DataProvider) {
 	s.dataProvider = dp
 }
 
+// requestHoldsPermission reports whether the request's authenticated principal holds
+// permissionID. WorkflowHandler uses it for the checks that sit beside a route's own
+// permission gate: an approval gate's approver_permission and the workflow:execute
+// check on the trigger routes (Issue #6488).
+func (s *Server) requestHoldsPermission(r *http.Request, permissionID string) bool {
+	principal, _ := r.Context().Value(principalContextKey).(*Principal)
+	return s.hasPermission(principal, permissionID)
+}
+
 // SetWorkflowHandler sets the workflow handler and registers workflow and trigger API routes
 // (Issue #414). Propagates the server's fleet query so that script dispatch targeting is wired
 // at setup time (Issue #609). Wires requirePermission into the handler so every workflow route
@@ -1825,10 +1834,7 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	h.SetRequirePermFn(s.requirePermission)
 	h.SetTenantResolution(s.rootTenantID, s.selectAuthorizedTenant)
 	h.SetAuditManager(s.auditManager)
-	h.SetPermissionCheck(func(r *http.Request, permissionID string) bool {
-		principal, _ := r.Context().Value(principalContextKey).(*Principal)
-		return s.hasPermission(principal, permissionID)
-	})
+	h.SetPermissionCheck(s.requestHoldsPermission)
 	workflowRouter := s.apiRouter.PathPrefix("/workflows").Subrouter()
 	if err := h.RegisterWorkflowRoutes(workflowRouter); err != nil {
 		// SetRequirePermFn was just called above with a non-nil gate, so this is
@@ -1840,6 +1846,15 @@ func (s *Server) SetWorkflowHandler(h *WorkflowHandler) {
 	triggerRouter := s.apiRouter.PathPrefix("/triggers").Subrouter()
 	triggerRouter.Use(s.requirePermission("trigger", "manage"))
 	h.RegisterTriggerRoutes(triggerRouter)
+	if h.triggerAPI != nil {
+		// New() validated every presence exemption except the ones whose routes are
+		// registered here (latePresenceExemptPermissions); a stale trigger exemption
+		// must still fail loudly rather than silently leave a route untapped or gated
+		// by a name that no longer exists (Issue #6488).
+		if err := s.validateLatePresenceExemptRoutes(); err != nil {
+			panic(fmt.Sprintf("SetWorkflowHandler: %v", err))
+		}
+	}
 	s.logger.Info("Workflow and trigger API routes registered")
 }
 

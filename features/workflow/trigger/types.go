@@ -113,8 +113,20 @@ type Trigger struct {
 	// UpdatedAt is when the trigger was last updated
 	UpdatedAt time.Time `json:"updated_at" yaml:"updated_at"`
 
-	// CreatedBy is who created the trigger
+	// CreatedBy is the authenticated principal that created the trigger. The manager
+	// sets it from the request context on create (a value in the request body is
+	// ignored) and preserves it across updates. Empty for triggers stored before
+	// ownership was recorded.
 	CreatedBy string `json:"created_by,omitempty" yaml:"created_by,omitempty"`
+
+	// UpdatedBy is the authenticated principal that last updated the trigger
+	// (an update, enable or disable).
+	UpdatedBy string `json:"updated_by,omitempty" yaml:"updated_by,omitempty"`
+
+	// Ownerless is true on a returned trigger that has no recorded creator (stored
+	// before ownership was recorded). It is computed on a copy at read time and
+	// never persisted; such a trigger keeps firing.
+	Ownerless bool `json:"ownerless,omitempty" yaml:"-"`
 
 	// Tags for trigger organization and filtering
 	Tags []string `json:"tags,omitempty" yaml:"tags,omitempty"`

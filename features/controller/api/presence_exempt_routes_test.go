@@ -13,6 +13,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/cfgis/cfgms/features/workflow"
+	"github.com/cfgis/cfgms/features/workflow/trigger"
+	"github.com/cfgis/cfgms/pkg/logging"
 	"github.com/cfgis/cfgms/pkg/session"
 	business "github.com/cfgis/cfgms/pkg/storage/interfaces/business"
 )
@@ -44,6 +47,18 @@ var exemptCases = []exemptCase{
 	{http.MethodPost, "/api/v1/runs/command", "/api/v1/runs/command", "steward:execute-scripts", "steward", "execute-scripts", false},
 	{http.MethodGet, "/api/v1/scripts", "/api/v1/scripts", "script:admin", "script", "admin", false},
 	{http.MethodGet, "/api/v1/scripts/{id}", "/api/v1/scripts/s1", "script:admin", "script", "admin", false},
+	// trigger:manage (Issue #6488): create, update, enable and manual execute take a tap;
+	// delete, disable and the reads do not.
+	{http.MethodPost, "/api/v1/triggers", "/api/v1/triggers", "trigger:manage", "trigger", "manage", true},
+	{http.MethodPut, "/api/v1/triggers/{id}", "/api/v1/triggers/t1", "trigger:manage", "trigger", "manage", true},
+	{http.MethodPost, "/api/v1/triggers/{id}/enable", "/api/v1/triggers/t1/enable", "trigger:manage", "trigger", "manage", true},
+	{http.MethodPost, "/api/v1/triggers/{id}/execute", "/api/v1/triggers/t1/execute", "trigger:manage", "trigger", "manage", true},
+	{http.MethodDelete, "/api/v1/triggers/{id}", "/api/v1/triggers/t1", "trigger:manage", "trigger", "manage", false},
+	{http.MethodPost, "/api/v1/triggers/{id}/disable", "/api/v1/triggers/t1/disable", "trigger:manage", "trigger", "manage", false},
+	{http.MethodGet, "/api/v1/triggers", "/api/v1/triggers", "trigger:manage", "trigger", "manage", false},
+	{http.MethodGet, "/api/v1/triggers/health", "/api/v1/triggers/health", "trigger:manage", "trigger", "manage", false},
+	{http.MethodGet, "/api/v1/triggers/{id}", "/api/v1/triggers/t1", "trigger:manage", "trigger", "manage", false},
+	{http.MethodGet, "/api/v1/triggers/{id}/executions", "/api/v1/triggers/t1/executions", "trigger:manage", "trigger", "manage", false},
 }
 
 func presenceStrongPrincipal(perm string) *Principal {
@@ -174,4 +189,57 @@ func TestValidatePresenceExemptRoutes_StaleEntryNamed(t *testing.T) {
 	err := server.validatePresenceExemptRoutes()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GET /api/v1/scripts/{renamed}")
+}
+
+// newServerWithTriggerRoutes returns a server whose trigger routes are registered the
+// production way: SetWorkflowHandler after New() (Issue #6488).
+func newServerWithTriggerRoutes(t *testing.T) *Server {
+	t.Helper()
+	server := setupTestServer(t)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	server.SetWorkflowHandler(NewWorkflowHandler(engine, nil, trigger.NewControllerTriggerManager(nil, nil), logging.NewNoopLogger()))
+	return server
+}
+
+// trigger:manage routes are registered after New() has validated the exemptions, so New()
+// skips them and SetWorkflowHandler validates them once they exist.
+func TestValidatePresenceExemptRoutes_TriggerRoutesValidatedLate(t *testing.T) {
+	server := setupTestServer(t)
+
+	require.NoError(t, server.validatePresenceExemptRoutes(),
+		"construction must not fail on trigger routes that SetWorkflowHandler registers later")
+	err := server.validateLatePresenceExemptRoutes()
+	require.Error(t, err, "before SetWorkflowHandler the trigger routes are absent")
+	assert.Contains(t, err.Error(), "trigger:manage")
+
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	server.SetWorkflowHandler(NewWorkflowHandler(engine, nil, trigger.NewControllerTriggerManager(nil, nil), logging.NewNoopLogger()))
+	require.NoError(t, server.validateLatePresenceExemptRoutes())
+	require.NoError(t, server.validatePresenceExemptRoutes())
+}
+
+func TestValidatePresenceExemptRoutes_StaleTriggerEntryPanicsAtSetWorkflowHandler(t *testing.T) {
+	server := setupTestServer(t)
+	orig := permissionAssurance["trigger:manage"]
+	t.Cleanup(func() { permissionAssurance["trigger:manage"] = orig })
+
+	stale := orig
+	stale.PresenceExemptRoutes = append(append([]string{}, orig.PresenceExemptRoutes...), "POST /api/v1/triggers/{id}/renamed")
+	permissionAssurance["trigger:manage"] = stale
+
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	h := NewWorkflowHandler(engine, nil, trigger.NewControllerTriggerManager(nil, nil), logging.NewNoopLogger())
+	require.PanicsWithValue(t,
+		"SetWorkflowHandler: presence-exempt routes match no registered route: trigger:manage: \"POST /api/v1/triggers/{id}/renamed\"",
+		func() { server.SetWorkflowHandler(h) })
+}
+
+// With no trigger manager the trigger routes are not registered, so there is nothing to
+// validate and SetWorkflowHandler must not panic.
+func TestValidatePresenceExemptRoutes_NoTriggerManagerDoesNotPanic(t *testing.T) {
+	server := setupTestServer(t)
+	engine := workflow.NewEngine(workflow.NewWorkflowModuleFactory(nil, nil), logging.NewNoopLogger(), nil, nil, nil, nil, nil)
+	require.NotPanics(t, func() {
+		server.SetWorkflowHandler(NewWorkflowHandler(engine, nil, nil, logging.NewNoopLogger()))
+	})
 }

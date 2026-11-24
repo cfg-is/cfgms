@@ -35,6 +35,18 @@ func extractTenantFromContext(ctx context.Context) string {
 	return ""
 }
 
+// extractPrincipalFromContext reads the authenticated principal ID from
+// ctxkeys.UserIDKey, which the controller API middleware places on the request
+// context for every principal type (session, web session, API key, mTLS). The
+// trigger owner record (CreatedBy/UpdatedBy) is always derived from it, never from
+// a request body.
+func extractPrincipalFromContext(ctx context.Context) string {
+	if id, ok := ctx.Value(ctxkeys.UserIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
+
 // StoreRequirements declares the storage stores required by the workflow-trigger subsystem.
 // Collected by collectActiveStorageRequirements in features/controller/server and validated
 // at startup via interfaces.ValidateStorageRequirements — a missing TriggerStore fails
@@ -134,32 +146,32 @@ func (tm *TriggerManagerImpl) Start(ctx context.Context) error {
 
 	// Start all components
 	if err := tm.scheduler.Start(ctx); err != nil {
-		logger.ErrorCtx(ctx, "Failed to start scheduler", "error", err.Error())
+		logger.ErrorCtx(ctx, "Failed to start scheduler", "error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("failed to start scheduler: %w", err)
 	}
 
 	if err := tm.webhookHandler.Start(ctx); err != nil {
-		logger.ErrorCtx(ctx, "Failed to start webhook handler", "error", err.Error())
+		logger.ErrorCtx(ctx, "Failed to start webhook handler", "error", logging.SanitizeLogValue(err.Error()))
 		if stopErr := tm.scheduler.Stop(ctx); stopErr != nil {
-			logger.ErrorCtx(ctx, "Failed to stop scheduler during cleanup", "error", stopErr.Error())
+			logger.ErrorCtx(ctx, "Failed to stop scheduler during cleanup", "error", logging.SanitizeLogValue(stopErr.Error()))
 		}
 		return fmt.Errorf("failed to start webhook handler: %w", err)
 	}
 
 	if err := tm.siemIntegration.Start(ctx); err != nil {
-		logger.ErrorCtx(ctx, "Failed to start SIEM integration", "error", err.Error())
+		logger.ErrorCtx(ctx, "Failed to start SIEM integration", "error", logging.SanitizeLogValue(err.Error()))
 		if stopErr := tm.scheduler.Stop(ctx); stopErr != nil {
-			logger.ErrorCtx(ctx, "Failed to stop scheduler during cleanup", "error", stopErr.Error())
+			logger.ErrorCtx(ctx, "Failed to stop scheduler during cleanup", "error", logging.SanitizeLogValue(stopErr.Error()))
 		}
 		if stopErr := tm.webhookHandler.Stop(ctx); stopErr != nil {
-			logger.ErrorCtx(ctx, "Failed to stop webhook handler during cleanup", "error", stopErr.Error())
+			logger.ErrorCtx(ctx, "Failed to stop webhook handler during cleanup", "error", logging.SanitizeLogValue(stopErr.Error()))
 		}
 		return fmt.Errorf("failed to start SIEM integration: %w", err)
 	}
 
 	// Load existing triggers from storage
 	if err := tm.loadTriggersFromStorage(ctx); err != nil {
-		logger.WarnCtx(ctx, "Failed to load triggers from storage", "error", err.Error())
+		logger.WarnCtx(ctx, "Failed to load triggers from storage", "error", logging.SanitizeLogValue(err.Error()))
 		// Don't fail startup for this, but log it
 	}
 
@@ -290,6 +302,14 @@ func (tm *TriggerManagerImpl) CreateTrigger(ctx context.Context, trigger *Trigge
 	// name any tenant and create a trigger outside the caller's own tenant.
 	trigger.TenantID = tenantID
 
+	// The owner is the authenticated principal, never a value in the request body:
+	// a caller must not be able to name another principal as the trigger's creator.
+	// The ownerless marker is computed on read and never stored.
+	principal := extractPrincipalFromContext(ctx)
+	trigger.CreatedBy = principal
+	trigger.UpdatedBy = principal
+	trigger.Ownerless = false
+
 	// Set timestamps
 	now := time.Now()
 	trigger.CreatedAt = now
@@ -381,6 +401,11 @@ func (tm *TriggerManagerImpl) UpdateTrigger(ctx context.Context, trigger *Trigge
 	trigger.CreatedAt = existingTrigger.CreatedAt
 	trigger.UpdatedAt = time.Now()
 	trigger.TenantID = existingTrigger.TenantID
+	// The update body is decoded into a fresh Trigger, so the owner must be carried
+	// over from the stored trigger or it would be wiped; UpdatedBy is the caller.
+	trigger.CreatedBy = existingTrigger.CreatedBy
+	trigger.UpdatedBy = extractPrincipalFromContext(ctx)
+	trigger.Ownerless = false
 
 	// Validate updated configuration
 	if err := tm.validateTrigger(ctx, trigger); err != nil {
@@ -509,6 +534,7 @@ func (tm *TriggerManagerImpl) GetTrigger(ctx context.Context, triggerID string) 
 
 	// Return a copy to prevent external modification
 	triggerCopy := *trigger
+	triggerCopy.Ownerless = triggerCopy.CreatedBy == ""
 	return &triggerCopy, nil
 }
 
@@ -539,25 +565,30 @@ func (tm *TriggerManagerImpl) ListTriggers(ctx context.Context, filter *TriggerF
 			}
 		}
 
-		// Create a copy to prevent external modification
+		// Create a copy to prevent external modification; the ownerless marker is
+		// set on the copy so stored state is never mutated.
 		triggerCopy := *trigger
+		triggerCopy.Ownerless = triggerCopy.CreatedBy == ""
 		triggers = append(triggers, &triggerCopy)
 	}
 
-	// Apply limit and offset
-	if filter != nil {
-		if filter.Offset > 0 && filter.Offset < len(triggers) {
-			triggers = triggers[filter.Offset:]
-		} else if filter.Offset >= len(triggers) {
-			triggers = []*Trigger{}
-		}
+	return paginateTriggers(triggers, filter), nil
+}
 
-		if filter.Limit > 0 && filter.Limit < len(triggers) {
-			triggers = triggers[:filter.Limit]
-		}
+// paginateTriggers applies the filter's offset and limit to an already filtered list.
+func paginateTriggers(triggers []*Trigger, filter *TriggerFilter) []*Trigger {
+	if filter == nil {
+		return triggers
 	}
-
-	return triggers, nil
+	if filter.Offset > 0 && filter.Offset < len(triggers) {
+		triggers = triggers[filter.Offset:]
+	} else if filter.Offset >= len(triggers) {
+		triggers = []*Trigger{}
+	}
+	if filter.Limit > 0 && filter.Limit < len(triggers) {
+		triggers = triggers[:filter.Limit]
+	}
+	return triggers
 }
 
 // EnableTrigger enables a disabled trigger
@@ -856,39 +887,23 @@ func (tm *TriggerManagerImpl) setTriggerStatus(ctx context.Context, triggerID st
 	}
 
 	oldStatus := trigger.Status
+	oldUpdatedBy := trigger.UpdatedBy
 	trigger.Status = status
 	trigger.UpdatedAt = time.Now()
+	trigger.UpdatedBy = extractPrincipalFromContext(ctx)
 
 	// Update in storage
 	if err := tm.saveTriggerToStorage(ctx, trigger); err != nil {
 		// Restore old status on failure
 		trigger.Status = oldStatus
+		trigger.UpdatedBy = oldUpdatedBy
 		logger.ErrorCtx(ctx, "Failed to update trigger status in storage",
 			"trigger_id", logging.SanitizeLogValue(triggerID),
 			"error", logging.SanitizeLogValue(err.Error()))
 		return fmt.Errorf("failed to update trigger status: %w", err)
 	}
 
-	// Handle handler registration/unregistration for every handler-backed trigger type
-	if trigger.Type == TriggerTypeSchedule || trigger.Type == TriggerTypeWebhook || trigger.Type == TriggerTypeSIEM {
-		if status == TriggerStatusActive && oldStatus != TriggerStatusActive {
-			// Register with scheduler when activating
-			if err := tm.registerTriggerWithHandler(ctx, trigger); err != nil {
-				logger.WarnCtx(ctx, "Failed to register trigger with scheduler during activation",
-					"trigger_id", logging.SanitizeLogValue(triggerID),
-					"error", logging.SanitizeLogValue(err.Error()))
-				// Don't fail the status update for this
-			}
-		} else if status == TriggerStatusInactive && oldStatus == TriggerStatusActive {
-			// Unregister from scheduler when deactivating
-			if err := tm.unregisterTriggerFromHandler(ctx, trigger); err != nil {
-				logger.WarnCtx(ctx, "Failed to unregister trigger from scheduler during deactivation",
-					"trigger_id", logging.SanitizeLogValue(triggerID),
-					"error", logging.SanitizeLogValue(err.Error()))
-				// Don't fail the status update for this
-			}
-		}
-	}
+	tm.syncHandlerForStatus(ctx, trigger, oldStatus, status)
 
 	logger.InfoCtx(ctx, "Trigger status updated",
 		"trigger_id", logging.SanitizeLogValue(triggerID),
@@ -896,6 +911,33 @@ func (tm *TriggerManagerImpl) setTriggerStatus(ctx context.Context, triggerID st
 		"new_status", status)
 
 	return nil
+}
+
+// syncHandlerForStatus registers or unregisters the trigger with its handler when a
+// status change activates or deactivates a handler-backed trigger. Handler failures
+// are logged and never fail the status update.
+func (tm *TriggerManagerImpl) syncHandlerForStatus(ctx context.Context, trigger *Trigger, oldStatus, status TriggerStatus) {
+	logger := tm.logger.WithTenant(trigger.TenantID)
+	// Handle handler registration/unregistration for every handler-backed trigger type
+	if trigger.Type == TriggerTypeSchedule || trigger.Type == TriggerTypeWebhook || trigger.Type == TriggerTypeSIEM {
+		if status == TriggerStatusActive && oldStatus != TriggerStatusActive {
+			// Register with scheduler when activating
+			if err := tm.registerTriggerWithHandler(ctx, trigger); err != nil {
+				logger.WarnCtx(ctx, "Failed to register trigger with scheduler during activation",
+					"trigger_id", logging.SanitizeLogValue(trigger.ID),
+					"error", logging.SanitizeLogValue(err.Error()))
+				// Don't fail the status update for this
+			}
+		} else if status == TriggerStatusInactive && oldStatus == TriggerStatusActive {
+			// Unregister from scheduler when deactivating
+			if err := tm.unregisterTriggerFromHandler(ctx, trigger); err != nil {
+				logger.WarnCtx(ctx, "Failed to unregister trigger from scheduler during deactivation",
+					"trigger_id", logging.SanitizeLogValue(trigger.ID),
+					"error", logging.SanitizeLogValue(err.Error()))
+				// Don't fail the status update for this
+			}
+		}
+	}
 }
 
 func (tm *TriggerManagerImpl) matchesFilter(trigger *Trigger, filter *TriggerFilter) bool {
@@ -1309,6 +1351,10 @@ func applyTriggerConfig(trigger *Trigger, payload []byte) (*WebhookConfig, error
 		trigger.Timeout = stored.Timeout
 		trigger.Concurrency = stored.Concurrency
 		trigger.Conditions = stored.Conditions
+		// Owner record: not a record column, so it survives a restart only if copied
+		// back here.
+		trigger.CreatedBy = stored.CreatedBy
+		trigger.UpdatedBy = stored.UpdatedBy
 		return stored.Webhook, nil
 	}
 	var webhook WebhookConfig

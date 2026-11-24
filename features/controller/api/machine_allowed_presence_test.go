@@ -108,6 +108,7 @@ func TestMachineAllowed_OnlyTheInstallerPermissionsAndConfigPush(t *testing.T) {
 		"config:rollback": true,                           // Issue #6383: mirrors config:push
 		"workflow:write":  true, "workflow:execute": true, // Issue #5498: scoped API keys keep running workflows
 		"monitoring:write-markers": true, // Issue #6063: the deploy agent records markers with an API key
+		"trigger:manage":           true, // Issue #6488: treated as workflow:execute; the route group also requires workflow:execute
 	}
 	for perm, req := range permissionAssurance {
 		assert.Equal(t, want[perm], req.AllowMachine, "AllowMachine on %q", perm)

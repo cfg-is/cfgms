@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/mux"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -103,6 +104,7 @@ func TestPermissionAssurance_CatastrophicForwardDeclarations(t *testing.T) {
 		"tenant:approve-delete",        // Issue #3182: ADR-027 dual-control deletion approval
 		"osquery:execute",              // Issue #3569: catalog queries may reach sensitive host state
 		"signing-credential:request",   // Issue #3687: mints a CSR-signing credential
+		"trigger:manage",               // Issue #6488: a trigger runs a workflow later, so it takes the same tap as running one
 	}
 	for _, perm := range catastrophic {
 		req, found := permissionAssurance[perm]
@@ -402,6 +404,7 @@ func TestPermissionAssurance_NonCatastrophicNoUserPresence(t *testing.T) {
 		"account:set-software-authenticator":  true, // Issue #6141: a tap to allow a software authenticator for an account
 		"workflow:write":                      true, // Issue #5899: a tap to save a workflow
 		"workflow:execute":                    true, // Issue #5899: a tap to start a workflow
+		"trigger:manage":                      true, // Issue #6488: a trigger runs a workflow later, so create, change, enable and manual run take the tap; delete, disable and reads are exempt
 		// Issue #6408 (ADR-021 Amendment 13): credential creation, authenticator and
 		// certificate binding, permission widening, account changes and break-glass.
 		"account:create":              true,
@@ -536,6 +539,191 @@ func TestPermissionAssurance_WorkflowWriteExecute_FloorEnforced(t *testing.T) {
 	}
 
 	assert.NotContains(t, permissionAssurance, "workflow:read", "workflow:read stays ungated")
+}
+
+// triggerManageTappedRoutes are the trigger routes that take a presence tap, and
+// triggerManageExemptRoutes the ones that do not (Issue #6488). The route-classification test
+// requires every registered /api/v1/triggers route to appear in exactly one of them.
+var triggerManageTappedRoutes = []string{
+	"POST /api/v1/triggers",
+	"PUT /api/v1/triggers/{id}",
+	"POST /api/v1/triggers/{id}/enable",
+	"POST /api/v1/triggers/{id}/execute",
+}
+
+var triggerManageExemptRoutes = []string{
+	"GET /api/v1/triggers/health",
+	"GET /api/v1/triggers",
+	"GET /api/v1/triggers/{id}",
+	"DELETE /api/v1/triggers/{id}",
+	"POST /api/v1/triggers/{id}/disable",
+	"GET /api/v1/triggers/{id}/executions",
+}
+
+// TestPermissionAssurance_TriggerManage_FloorEnforced is a REQUIRED test (Issue #6488): creating,
+// re-targeting, enabling or manually running a trigger takes the same Strong floor and presence
+// tap as running the workflow it starts, and a machine principal is never asked for a tap. It
+// drives the real requirePermission gate on the real trigger routes.
+func TestPermissionAssurance_TriggerManage_FloorEnforced(t *testing.T) {
+	req, found := permissionAssurance["trigger:manage"]
+	require.True(t, found, "trigger:manage must be in permissionAssurance")
+	assert.Equal(t, session.AssuranceStrong, req.Min)
+	assert.True(t, req.RequireUserPresence, "a human takes a passkey tap")
+	assert.True(t, req.AllowMachine, "scoped API keys are treated as for workflow:execute")
+	assert.ElementsMatch(t, triggerManageExemptRoutes, req.PresenceExemptRoutes)
+
+	server, router, mgr := triggerGateFixture(t)
+
+	// Holding workflow:execute too keeps the workflow:execute check out of the way: this test
+	// is about the assurance gate.
+	perms := []string{"trigger:manage", "workflow:execute"}
+	machine := triggerGatePrincipal("seed-key", session.AssuranceMachine, perms...)
+	seed := httptest.NewRecorder()
+	router.ServeHTTP(seed, triggerGateRequest(http.MethodPost, "/api/v1/triggers", string(scheduleTriggerBody(t, "t1")), machine))
+	require.Equal(t, http.StatusCreated, seed.Code, seed.Body.String())
+
+	routes := []struct {
+		method, template, path, body string
+		wantOK                       int
+	}{
+		{http.MethodPost, "/api/v1/triggers", "/api/v1/triggers", string(scheduleTriggerBody(t, "t2")), http.StatusCreated},
+		{http.MethodPut, "/api/v1/triggers/{id}", "/api/v1/triggers/t1", string(scheduleTriggerBody(t, "t1")), http.StatusOK},
+		{http.MethodPost, "/api/v1/triggers/{id}/enable", "/api/v1/triggers/t1/enable", "", http.StatusOK},
+		{http.MethodPost, "/api/v1/triggers/{id}/execute", "/api/v1/triggers/t1/execute", "{}", http.StatusOK},
+	}
+	for _, rt := range routes {
+		t.Run(rt.method+" "+rt.template, func(t *testing.T) {
+			serve := func(r *http.Request) *httptest.ResponseRecorder {
+				rec := httptest.NewRecorder()
+				router.ServeHTTP(rec, r)
+				return rec
+			}
+
+			basic := triggerGatePrincipal("basic-user", session.AssuranceBasic, perms...)
+			rec := serve(triggerGateRequest(rt.method, rt.path, rt.body, basic))
+			assert.Equal(t, http.StatusUnauthorized, rec.Code)
+			assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
+
+			human := triggerGatePrincipal("strong-user", session.AssuranceStrong, perms...)
+			assertPresenceChallenge(t, serve(triggerGateRequest(rt.method, rt.path, rt.body, human)), "trigger:manage")
+
+			tapped := triggerGateRequest(rt.method, rt.path, rt.body, human)
+			tapTriggerRequest(t, server, tapped, human)
+			rec = serve(tapped)
+			assert.Equal(t, rt.wantOK, rec.Code, "a tapped Strong session reaches the handler: %s", rec.Body.String())
+		})
+	}
+
+	// The machine principal needs no tap on any of them. Run last: the create above stored t2.
+	for _, rt := range routes {
+		rec := httptest.NewRecorder()
+		body := rt.body
+		path := rt.path
+		if rt.method == http.MethodPost && rt.template == "/api/v1/triggers" {
+			body = string(scheduleTriggerBody(t, "t3"))
+		}
+		router.ServeHTTP(rec, triggerGateRequest(rt.method, path, body, machine))
+		assert.Equal(t, rt.wantOK, rec.Code, "machine principal on %s %s needs no tap: %s", rt.method, rt.template, rec.Body.String())
+	}
+	assert.ElementsMatch(t, []string{"t1", "t2", "t3"}, storedTriggerIDs(t, mgr))
+}
+
+// TestPermissionAssurance_TriggerManage_ExemptRoutesNeedNoTap is a REQUIRED test (Issue #6488):
+// delete, disable and the reads succeed for a Strong human session with no presence token (stopping
+// or removing automation is a de-escalation), still need a Strong session, and a create that is
+// answered with a step-up challenge stores nothing.
+func TestPermissionAssurance_TriggerManage_ExemptRoutesNeedNoTap(t *testing.T) {
+	server, router, mgr := triggerGateFixture(t)
+	perms := []string{"trigger:manage", "workflow:execute"}
+	human := triggerGatePrincipal("strong-user", session.AssuranceStrong, perms...)
+
+	serve := func(method, path, body string, p *Principal) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, triggerGateRequest(method, path, body, p))
+		return rec
+	}
+
+	// A create without a tap is challenged and stores nothing.
+	rec := serve(http.MethodPost, "/api/v1/triggers", string(scheduleTriggerBody(t, "untapped")), human)
+	assertPresenceChallenge(t, rec, "trigger:manage")
+	assert.Empty(t, storedTriggerIDs(t, mgr), "a create answered with a step-up challenge must store nothing")
+
+	for _, id := range []string{"a", "b"} {
+		req := triggerGateRequest(http.MethodPost, "/api/v1/triggers", string(scheduleTriggerBody(t, id)), human)
+		tapTriggerRequest(t, server, req, human)
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	}
+
+	for _, c := range []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/triggers/health"},
+		{http.MethodGet, "/api/v1/triggers"},
+		{http.MethodGet, "/api/v1/triggers/a"},
+		{http.MethodGet, "/api/v1/triggers/a/executions"},
+		{http.MethodPost, "/api/v1/triggers/a/disable"},
+		{http.MethodDelete, "/api/v1/triggers/a"},
+	} {
+		rec := serve(c.method, c.path, "", human)
+		assert.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code, "%s %s needs no tap: %s", c.method, c.path, rec.Body.String())
+	}
+	assert.Equal(t, []string{"b"}, storedTriggerIDs(t, mgr))
+
+	// No tap is not no assurance: a Basic session is still stepped up on a read.
+	basic := triggerGatePrincipal("basic-user", session.AssuranceBasic, perms...)
+	rec = serve(http.MethodGet, "/api/v1/triggers", "", basic)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Header().Get("WWW-Authenticate"), "CFGMS-StepUp")
+}
+
+// TestPermissionAssurance_TriggerManage_RouteClassification is a REQUIRED test (Issue #6488): every
+// registered /api/v1/triggers route is deliberately classified as tap-required or tap-exempt, and
+// every PresenceExemptRoutes entry for trigger:manage matches a registered route. A trigger route
+// added later without a classification decision fails here instead of silently inheriting the
+// default.
+func TestPermissionAssurance_TriggerManage_RouteClassification(t *testing.T) {
+	server := newServerWithTriggerRoutes(t)
+
+	registered := map[string]bool{}
+	require.NoError(t, server.router.Walk(func(r *mux.Route, _ *mux.Router, _ []*mux.Route) error {
+		tpl, err := r.GetPathTemplate()
+		if err != nil || !strings.HasPrefix(tpl, "/api/v1/triggers") {
+			return nil
+		}
+		methods, err := r.GetMethods()
+		if err != nil {
+			return nil
+		}
+		for _, m := range methods {
+			registered[m+" "+tpl] = true
+		}
+		return nil
+	}))
+	require.NotEmpty(t, registered, "the walk must see the trigger routes")
+
+	exempt := map[string]bool{}
+	for _, e := range permissionAssurance["trigger:manage"].PresenceExemptRoutes {
+		exempt[e] = true
+	}
+	decided := map[string]bool{}
+	for _, e := range triggerManageExemptRoutes {
+		decided[e] = true
+		assert.True(t, exempt[e], "%s must be presence-exempt", e)
+	}
+	for _, e := range triggerManageTappedRoutes {
+		decided[e] = true
+		assert.False(t, exempt[e], "%s must take a presence tap", e)
+	}
+
+	for route := range registered {
+		assert.True(t, decided[route], "trigger route %q has no presence classification: add it to the tap-required or the exempt list deliberately", route)
+	}
+	for e := range exempt {
+		assert.True(t, registered[e], "presence-exempt entry %q matches no registered trigger route", e)
+	}
+	for e := range decided {
+		assert.True(t, registered[e], "classified route %q is not registered", e)
+	}
 }
 
 // TestStartupScan_NoWarnForWorkflowWriteExecuteKey is a REQUIRED test (Issue #5498): an API key

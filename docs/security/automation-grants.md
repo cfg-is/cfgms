@@ -22,6 +22,16 @@ Every script runs as SYSTEM on the endpoint. The question this design answers is
 
 A human takes a passkey tap to save a workflow and a tap to start one; the steps of a running workflow take no per-step tap. A script step runs outside a grant only from a workflow version published with a tap. The publication, not the script evaluator, covers such a step: it runs the library script pinned by `script_id` and `script_version` in the run's own tenant, and the queue refuses it at dispatch if the content changed after the step queued. The publication is verified at each start, so a scheduled, webhook or API-key run of a published version needs no tap, and risk (d) applies to it. Script steps of nested workflows and of a resumed approval tail are refused outside a grant in v1. The steward's signature check applies to these steps as to every library run.
 
+## Triggers
+
+A trigger runs a workflow later with no one present, so creating or changing one needs the same tap as running the workflow. Creating a trigger, updating its target or schedule, enabling it and running it on demand each need strong assurance, a presence tap and `workflow:execute` (enable needs the tap but names no new target, so it does not check `workflow:execute`). Without this, a hijacked session holding `trigger:manage` could arm a persistent schedule or webhook that the same session could not start once without a tap.
+
+Deleting and disabling a trigger and reading triggers take no tap: stopping or removing automation is a de-escalation. They still need a strong session, because the permission is classified once for every trigger route. A scoped API key is treated as for `workflow:execute`: never asked for a tap, and it must still hold `workflow:execute` to create, update or run a trigger.
+
+Every trigger records the principal that created it and the principal that last updated it, taken from the authenticated caller and never from the request body. Triggers created before this was recorded have no owner: they keep firing and are reported as ownerless (`"ownerless": true` on `GET /api/v1/triggers` and `GET /api/v1/triggers/{id}`). Review them and recreate the ones still wanted so that each has a named owner.
+
+A trigger is not re-authorized when it fires. It runs the latest saved version of the workflow by name, whether or not the owner still holds `workflow:execute` and whether or not the version was published. Re-checking the owner at fire time, revoking triggers when the owner loses access and pinning a trigger to a published version are not implemented.
+
 ## Threat model
 
 ### Grant theft

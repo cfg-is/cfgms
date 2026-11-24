@@ -733,3 +733,191 @@ describe('TriggerPanel — workflowName filter', () => {
     expect(screen.getByTestId('trigger-workflow-input')).toHaveValue('wf-1')
   })
 })
+
+// ── Presence tap (Issue #6488) ───────────────────────────────────────────────
+// Creating, changing, enabling or manually running a trigger takes a presence tap
+// for a human session; delete and disable do not. TriggerPanel reaches the API only
+// through apiFetch, whose CFGMS-StepUp path raises the shared StepUpModal and retries
+// with X-Presence-Token — the same path WorkflowApprovalPanel relies on.
+
+const json = (status: number, body: unknown, headers: Record<string, string> = {}) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { 'Content-Type': 'application/json', ...headers },
+  })
+const envelope = (data: unknown) => ({ data, timestamp: new Date().toISOString() })
+
+const tapCredential = {
+  id: 'cred-id',
+  type: 'public-key',
+  rawId: new TextEncoder().encode('cred-id').buffer,
+  response: {
+    clientDataJSON: new TextEncoder().encode('{"type":"webauthn.get"}').buffer,
+    authenticatorData: new TextEncoder().encode('authenticator-data').buffer,
+    signature: new TextEncoder().encode('signature').buffer,
+    userHandle: null,
+  },
+  getClientExtensionResults: () => ({}),
+  authenticatorAttachment: null,
+  toJSON: () => ({}),
+}
+
+function presenceRoutes(url: string): Response | undefined {
+  if (url.includes('presence/begin')) {
+    return json(
+      200,
+      envelope({
+        publicKey: {
+          challenge: 'Y2hhbGxlbmdl',
+          timeout: 60000,
+          rpId: 'localhost',
+          allowCredentials: [{ type: 'public-key', id: 'Y3JlZA', transports: ['internal'] }],
+          userVerification: 'required',
+        },
+      }),
+    )
+  }
+  if (url.includes('presence/finish')) {
+    return json(200, envelope({ presence_token: 'tap-token-1', expires_in: 30 }))
+  }
+  return undefined
+}
+
+function triggerStepUpRequired(): Response {
+  return json(
+    401,
+    { error: 'step_up_required', required_assurance: 'strong', presence_required: true },
+    {
+      'WWW-Authenticate':
+        'CFGMS-StepUp realm="cfgms", required="strong", presence="required", permission="trigger:manage"',
+    },
+  )
+}
+
+describe('TriggerPanel — presence tap', () => {
+  it('completes a create through the step-up path: 401 challenge, tap, retry with X-Presence-Token', async () => {
+    vi.stubGlobal('navigator', { credentials: { get: vi.fn().mockResolvedValue(tapCredential) } })
+    const posts: { token: string | null; body: unknown }[] = []
+    let created = false
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      const presence = presenceRoutes(url)
+      if (presence) return Promise.resolve(presence)
+      if (method === 'POST' && url === '/api/v1/triggers') {
+        const token = new Headers(init?.headers).get('X-Presence-Token')
+        posts.push({ token, body: JSON.parse(String(init?.body)) })
+        if (['tap-token-1'].includes(token ?? '')) {
+          created = true
+          return Promise.resolve(json(201, makeTrigger({ name: 'new-trigger' })))
+        }
+        return Promise.resolve(triggerStepUpRequired())
+      }
+      if (method === 'GET' && url.startsWith('/api/v1/triggers')) {
+        return Promise.resolve(makeTriggersResponse(created ? [makeTrigger({ name: 'new-trigger' })] : []))
+      }
+      return Promise.resolve(json(404, { error: 'unexpected request ' + method + ' ' + url }))
+    })
+
+    renderTriggerPanel()
+    await waitFor(() => expect(screen.getByTestId('trigger-empty')).toBeInTheDocument())
+
+    fireEvent.click(screen.getByTestId('toggle-trigger-create-btn'))
+    fireEvent.change(screen.getByTestId('trigger-name-input'), { target: { value: 'new-trigger' } })
+    fireEvent.change(screen.getByTestId('trigger-workflow-input'), { target: { value: 'wf-1' } })
+    fireEvent.click(screen.getByTestId('trigger-create-submit-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    expect(posts).toHaveLength(1)
+    expect(posts[0]!.token).toBeNull()
+
+    fireEvent.click(await screen.findByTestId('step-up-verify-btn'))
+
+    await waitFor(() => expect(posts).toHaveLength(2))
+    expect(posts[1]!.token).toBe('tap-token-1')
+    expect(posts[1]!.body).toEqual(posts[0]!.body)
+    await waitFor(() => expect(screen.queryByTestId('trigger-create-form')).toBeNull())
+    await waitFor(() => expect(screen.getByTestId('trigger-table')).toBeInTheDocument())
+  })
+
+  it('creates nothing and sends no retry when the tap is cancelled', async () => {
+    const posts: (string | null)[] = []
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (method === 'POST' && url === '/api/v1/triggers') {
+        posts.push(new Headers(init?.headers).get('X-Presence-Token'))
+        return Promise.resolve(triggerStepUpRequired())
+      }
+      if (method === 'GET' && url.startsWith('/api/v1/triggers')) {
+        return Promise.resolve(makeTriggersResponse([]))
+      }
+      return Promise.resolve(json(404, { error: 'unexpected request ' + method + ' ' + url }))
+    })
+
+    renderTriggerPanel()
+    await waitFor(() => expect(screen.getByTestId('trigger-empty')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('toggle-trigger-create-btn'))
+    fireEvent.change(screen.getByTestId('trigger-name-input'), { target: { value: 'new-trigger' } })
+    fireEvent.change(screen.getByTestId('trigger-workflow-input'), { target: { value: 'wf-1' } })
+    fireEvent.click(screen.getByTestId('trigger-create-submit-btn'))
+
+    await waitFor(() => expect(screen.getByTestId('step-up-overlay')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('step-up-cancel-btn'))
+
+    await waitFor(() => expect(screen.queryByTestId('step-up-overlay')).toBeNull())
+    expect(posts).toEqual([null])
+  })
+
+  it('deletes a trigger with no step-up and no presence token', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (method === 'DELETE' && url === '/api/v1/triggers/trig-1') {
+        return Promise.resolve(json(200, { message: 'Trigger deleted successfully', trigger_id: 'trig-1' }))
+      }
+      if (method === 'GET' && url.startsWith('/api/v1/triggers')) {
+        return Promise.resolve(makeTriggersResponse([makeTrigger()]))
+      }
+      return Promise.resolve(json(404, { error: 'unexpected request ' + method + ' ' + url }))
+    })
+
+    renderTriggerPanel()
+    await waitFor(() => expect(screen.getByTestId('trigger-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('trigger-delete-btn'))
+    fireEvent.click(screen.getByTestId('trigger-delete-confirm-btn'))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    expect(screen.queryByTestId('step-up-overlay')).toBeNull()
+    const deletes = fetchMock.mock.calls.filter(([, i]) => i?.method === 'DELETE')
+    expect(deletes).toHaveLength(1)
+    expect(new Headers(deletes[0]![1]!.headers).get('X-Presence-Token')).toBeNull()
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence'))).toBe(false)
+  })
+
+  it('disables a trigger with no step-up and no presence token', async () => {
+    fetchMock.mockImplementation((input, init) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (method === 'POST' && url === '/api/v1/triggers/trig-1/disable') {
+        return Promise.resolve(json(200, { status: 'inactive', trigger_id: 'trig-1', message: 'Trigger disabled successfully' }))
+      }
+      if (method === 'GET' && url.startsWith('/api/v1/triggers')) {
+        return Promise.resolve(makeTriggersResponse([makeTrigger({ status: 'active' })]))
+      }
+      return Promise.resolve(json(404, { error: 'unexpected request ' + method + ' ' + url }))
+    })
+
+    renderTriggerPanel()
+    await waitFor(() => expect(screen.getByTestId('trigger-table')).toBeInTheDocument())
+    fireEvent.click(screen.getByTestId('trigger-toggle-btn'))
+
+    await waitFor(() => {
+      const disables = fetchMock.mock.calls.filter(([u]) => String(u).endsWith('/disable'))
+      expect(disables).toHaveLength(1)
+      expect(new Headers(disables[0]![1]!.headers).get('X-Presence-Token')).toBeNull()
+    })
+    expect(screen.queryByTestId('step-up-overlay')).toBeNull()
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('presence'))).toBe(false)
+  })
+})
