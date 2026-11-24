@@ -15,6 +15,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -245,20 +246,49 @@ type denyRegistrationRequest struct {
 	Reason string `json:"reason,omitempty"`
 }
 
+// listPendingInScope lists pending registrations visible to a caller bound to
+// callerTenant. An empty callerTenant (root) keeps the store's all-tenants read;
+// the root read scope and crossing rules then decide per entry. Otherwise it reads
+// every tenant in callerTenant's subtree (itself plus ParentID descendants, via
+// tenantSubtreeIDs, which fails closed to callerTenant alone) and merges the rows
+// by RegisteredAt ascending, the store's ordering contract. Only subtree rows are
+// read; the store keeps exact-tenant semantics.
+func (s *Server) listPendingInScope(ctx context.Context, callerTenant string) ([]*business.PendingRegistrationEntry, error) {
+	if callerTenant == "" {
+		return s.pendingStore.ListPending(ctx, "")
+	}
+	var merged []*business.PendingRegistrationEntry
+	for id := range s.tenantSubtreeIDs(ctx, callerTenant) {
+		entries, err := s.pendingStore.ListPending(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		merged = append(merged, entries...)
+	}
+	sort.SliceStable(merged, func(i, j int) bool {
+		if !merged[i].RegisteredAt.Equal(merged[j].RegisteredAt) {
+			return merged[i].RegisteredAt.Before(merged[j].RegisteredAt)
+		}
+		return merged[i].PendingID < merged[j].PendingID
+	})
+	return merged, nil
+}
+
 // handleListPendingRegistrations handles GET /api/v1/registration/pending.
 // Returns all quarantined stewards awaiting operator approval. A root-scoped
 // operator sees root's own entries, and a client tenant's only under a crossing.
-// Scoped callers (API-key principals) see only their own tenant's entries; unscoped
-// (mTLS admin, callerTenant == "") retain global visibility.
+// Tenant-scoped callers (API-key principals) see their own tenant's entries and
+// those of every descendant tenant; unscoped (mTLS admin, callerTenant == "")
+// retain global visibility.
 func (s *Server) handleListPendingRegistrations(w http.ResponseWriter, r *http.Request) {
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
 		return
 	}
 	callerTenant := s.callerTenantID(r)
-	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
+	entries, err := s.listPendingInScope(r.Context(), callerTenant)
 	if err != nil {
-		s.logger.Error("Failed to list pending registrations", "error", err)
+		s.logger.Error("Failed to list pending registrations", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
 		return
 	}
@@ -801,7 +831,7 @@ type approveByCIDRRequest struct {
 // handleApproveAllRegistrations handles POST /api/v1/registration/approve-all.
 // Approves every entry currently in "pending" status and returns the count.
 // Idempotent: entries already approved/claimed/denied are skipped without error.
-// Scoped callers approve only within their own tenant subtree.
+// Tenant-scoped callers approve only within their own tenant subtree.
 func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Request) {
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
@@ -812,9 +842,9 @@ func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Re
 		return
 	}
 	callerTenant := s.callerTenantID(r)
-	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
+	entries, err := s.listPendingInScope(r.Context(), callerTenant)
 	if err != nil {
-		s.logger.Error("Failed to list pending registrations for approve-all", "error", err)
+		s.logger.Error("Failed to list pending registrations for approve-all", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
 		return
 	}
@@ -837,7 +867,7 @@ func (s *Server) handleApproveAllRegistrations(w http.ResponseWriter, r *http.Re
 // handleApproveByCIDR handles POST /api/v1/registration/approve-by-cidr.
 // Filters pending entries by source IP containment in the given CIDR (evaluated in Go,
 // not delegated to storage) and approves matching entries. Returns the count approved.
-// Scoped callers approve only within their own tenant subtree.
+// Tenant-scoped callers approve only within their own tenant subtree.
 func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 	if s.pendingStore == nil {
 		http.Error(w, "registration store unavailable", http.StatusServiceUnavailable)
@@ -865,7 +895,7 @@ func (s *Server) handleApproveByCIDR(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "forbidden: tenant scope required", http.StatusForbidden)
 		return
 	}
-	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
+	entries, err := s.listPendingInScope(r.Context(), callerTenant)
 	if err != nil {
 		s.logger.Error("Failed to list pending registrations for approve-by-cidr", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
@@ -953,9 +983,9 @@ func (s *Server) handleApproveByCIDRPreview(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "forbidden: tenant scope required", http.StatusForbidden)
 		return
 	}
-	entries, err := s.pendingStore.ListPending(r.Context(), callerTenant)
+	entries, err := s.listPendingInScope(r.Context(), callerTenant)
 	if err != nil {
-		s.logger.Error("Failed to list pending registrations for approve-by-cidr preview", "error", err)
+		s.logger.Error("Failed to list pending registrations for approve-by-cidr preview", "error", logging.SanitizeLogValue(err.Error()))
 		http.Error(w, "Failed to list pending registrations", http.StatusInternalServerError)
 		return
 	}

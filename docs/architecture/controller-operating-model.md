@@ -2128,7 +2128,7 @@ cfg registration ip-trust revoke 10.0.0.0/8 --tenant-id acme-corp
 
 | Command | HTTP call | Effect |
 |---|---|---|
-| `cfg registration pending` | `GET /api/v1/registration/pending` | Lists all quarantined stewards with SOURCE_IP and RDNS |
+| `cfg registration pending` | `GET /api/v1/registration/pending` | Lists quarantined stewards of the caller's tenant and its descendant tenants (all tenants for a root caller) with SOURCE_IP and RDNS |
 | `cfg registration approve <id>` | `POST /api/v1/registration/{id}/approve` | Promotes steward status to `registered` |
 | `cfg registration deny <id>` | `POST /api/v1/registration/{id}/deny` | Removes steward from pending queue |
 | `cfg registration approve-all` | `POST /api/v1/registration/approve-all` | Approves all pending registrations in the caller's tenant scope; prints count approved |
