@@ -41,6 +41,8 @@ You receive a PR number, story issue number, and project item ID as `$ARGUMENTS`
 
 The story issue number is retained for PR linking and assignee operations. `ITEM_ID` is used for body reads and status updates.
 
+Two other assignments have no story: a slice (`pr:<PR_NUM> slice:<n> epic:<N> --project-item <ITEM_ID>`) and a PR with no story (`pr:<PR_NUM> no-story`). See "Slice PRs of an owner-run epic" and "PRs with no story" below.
+
 ## Phase 0.5: External-Author Gate (BLOCKING)
 
 Before any review work, verify that the PR author is a trusted collaborator. Run:
@@ -321,6 +323,7 @@ PASS requires BOTH: the Findings table is empty AND every Code-Reference Verific
 # open after the PR merges without it.
 /opt/cfgms-trusted/.claude/tooling/scripts/po-act.sh enqueue <PR_NUM> <STORY_NUM>
 # Slice PR (feature/epic-<N>-slice-<n>): enqueue <PR_NUM> --head <reviewed sha>, no story. See "Slice PRs of an owner-run epic".
+# PR with no story: class AUTO only (docs/ outside ADRs, product intent, docs/development/), enqueue <PR_NUM> --head <reviewed sha>, no story; class APPROVAL (incl. the tooling pointer) never. See "PRs with no story".
 
 ```
 
@@ -402,6 +405,17 @@ A PR on `feature/epic-<N>-slice-<n>` is a slice of an owner-run epic, not a stor
 - PASS: post the verdict comment first, then run `po-act.sh enqueue <PR> --head <reviewed sha>` with no story argument.
 - FAIL: post the verdict comment and nothing else. The epic run's supervisor wakes the owner, who repairs the slice.
 - Never write a board field or assignee, and never escalate a round 2 to `Blocked`: round counting and board status do not apply to a slice.
+
+## PRs with no story
+
+The assignment `pr:<PR_NUM> no-story` is a PR with no story, no issue and no project item: a `.claude/tooling` pointer move, a prompt or a document change. `agent-dispatch.sh review-pr` gives you a no-story prompt that names the PR's class; where it and this file differ, the prompt wins. Class AUTO is only `docs/` outside `docs/architecture/decisions/`, `docs/product/` and `docs/development/`. Everything else it may change is class APPROVAL, also the `.claude/tooling` pointer. In short:
+
+- The PR title and body are the specification. There are no acceptance criteria and no item, so the item and status steps of this file do not apply: the `status "In Progress"` writes in Phase 0.5 and Phase 0 (post the comment that the phase asks for and stop), the item read and the round count in Phase 1, the story-body parts of Phase 2.5 and Phase 3, and the `Done` / `Fix` / `Blocked` writes and the assignee in Phase 5.
+- The verdict comment starts with the sentinel, the heading and a line `Reviewed head: <sha>` naming the commit you reviewed. It has no "Enqueued" line. Post it FIRST.
+- Class AUTO, PASS: after the comment, run `/opt/cfgms-trusted/.claude/tooling/scripts/po-act.sh enqueue <PR> --head <reviewed sha>` with no story argument; never the copy under /workspace. `ENQUEUED` or `ALREADY_QUEUED`: done. Anything else: post its line as a second, plain comment and stop; do not retry.
+- Class APPROVAL, PASS: post the verdict comment only. Never enqueue, never apply a label, never approve: a person lets it merge.
+- FAIL (any class): the verdict comment and nothing else. No board field, no assignee, no second-review escalation, and no fix cycle.
+- WAIT (checks pending): as this file says for WAIT; the comment has no `Reviewed head:` line.
 
 ## Rules
 
