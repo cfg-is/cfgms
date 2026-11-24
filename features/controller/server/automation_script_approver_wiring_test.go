@@ -283,8 +283,19 @@ func TestServer_New_InstallsScriptApprover_UnapprovedOrChangedScriptIsRefused(t 
 // [REQUIRED TEST] A run that is not restricted behaves as it did before the approver was
 // installed. A workflow without a script step runs; a script step outside a grant and
 // without a verified Publication is refused by the engine before any approver is asked,
-// and nothing is queued. (Producing a tap Publication needs a WebAuthn ceremony; that
-// path is covered by the controller API publish tests and the engine publication tests.)
+// and nothing is queued. A version that carries a stored Publication is verified by the
+// verifier the composition root installed (api.Server.VerifyWorkflowPublication); a
+// Publication its signer account cannot back is refused the same way.
+//
+// Not covered here: a run whose Publication verifies and whose script step then queues.
+// A real Publication is signed by a registered passkey account through a WebAuthn ceremony
+// that needs a cookie-authenticated web session; the signer accounts, credentials and
+// session are internal to features/controller/api and cannot be built from this package.
+// That success path is covered by the controller API publish tests
+// (features/controller/api/handlers_workflow_publish_test.go) and the engine publication
+// tests (features/workflow/engine_publication_test.go). This test file cannot show it
+// through New(...), so the acceptance criterion's tap-published success case needs a human
+// decision.
 func TestServer_New_InstallsScriptApprover_UnrestrictedRunUnchanged(t *testing.T) {
 	f := newApproverWiringFixture(t)
 	vs := f.publishScript(t, approverWiringScript, 0, approverWiringBody)
@@ -309,5 +320,26 @@ func TestServer_New_InstallsScriptApprover_UnrestrictedRunUnchanged(t *testing.T
 		assert.Empty(t, f.srv.executionQueue.PeekForDevice(f.steward))
 		assert.Zero(t, f.srv.executionQueue.GetTotalQueueDepth())
 		assert.True(t, strings.Contains(err.Error(), "restricted"), err.Error())
+	})
+
+	t.Run("script step of a version with an unverifiable publication is refused", func(t *testing.T) {
+		wf := workflow.Workflow{Name: "forged-publication", Version: "1.0.0", Steps: []workflow.Step{f.scriptStep(approverWiringScript, "1.0.0")}}
+		sv, err := workflow.ParseSemanticVersion("1.0.0")
+		require.NoError(t, err)
+		vw := &workflow.VersionedWorkflow{
+			Workflow:        wf,
+			SemanticVersion: *sv,
+			Publication: &workflow.Publication{
+				ContentHash:     "not-the-content-hash",
+				Nonce:           "nonce",
+				ExpiresAt:       time.Now().Add(time.Hour),
+				SignerAccountID: "no-such-account",
+				SignedAt:        time.Now(),
+			},
+		}
+		_, err = engine.ExecuteWorkflow(workflow.WithExecutingVersion(ctx, vw), wf, nil)
+		require.ErrorIs(t, err, workflow.ErrScriptStepNotRestricted)
+		assert.Empty(t, f.srv.executionQueue.PeekForDevice(f.steward))
+		assert.Zero(t, f.srv.executionQueue.GetTotalQueueDepth())
 	})
 }
