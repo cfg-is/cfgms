@@ -429,6 +429,11 @@ func rowsToMaps(rows []*transportpb.OsqueryRow) []map[string]string {
 
 // emitOsqueryAudit records an osquery dispatch audit event.
 // stewardIDs is the list of targeted steward IDs. No-op when auditManager is nil.
+//
+// The query has already run on the endpoints when this is called, so the write
+// must not depend on the client still being connected: it uses a context that
+// keeps the request's values but is not cancelled with it, bounded by
+// auditWriteTimeout so a stalled audit path cannot hold the goroutine open.
 func (s *Server) emitOsqueryAudit(r *http.Request, actorID, catalogID string, stewardIDs []string) {
 	if s.auditManager == nil {
 		return
@@ -455,7 +460,9 @@ func (s *Server) emitOsqueryAudit(r *http.Request, actorID, catalogID string, st
 		b = b.Detail(fmt.Sprintf("steward_%d", i), logging.SanitizeLogValue(sid))
 	}
 
-	if err := s.auditManager.RecordEvent(r.Context(), b); err != nil {
+	ctx, cancel := detachedAuditContext(r.Context())
+	defer cancel()
+	if err := s.auditManager.RecordEvent(ctx, b); err != nil {
 		s.logger.Warn("Failed to emit osquery audit event",
 			"error", logging.SanitizeLogValue(err.Error()),
 			"catalog_id", logging.SanitizeLogValue(catalogID))
