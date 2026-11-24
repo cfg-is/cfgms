@@ -1592,7 +1592,7 @@ rejected with `403 FORBIDDEN`.
 
 Create a new registration token. The response includes the full secret (`token`) and the stable `token_id` — this is the only time the secret is returned.
 
-**Request body:** `tenant_id` (required), `controller_url` (required), `group` (optional), `expires_in` (optional), and `label` (optional). `label` is free text for operators — at most 100 characters, printable only; an over-length label or one containing control characters is rejected with `400`. It is stored as-is, returned in the create and list responses, recorded (sanitised) in the creation audit event, and is never part of the token secret or its lookup key. It cannot be edited after mint, and a rotated token does not inherit it.
+**Request body:** `tenant_id` (required), `controller_url` (required), `group` (optional), `expires_in` (optional), and `label` (optional). `expires_in` is a Go duration (for example `30m`, `24h`) or a whole number of days (for example `7d`, `30d`); when omitted or empty the token expires 15 minutes after creation. There is no no-expiry value, so set a longer lifetime explicitly for a long-running rollout. `label` is free text for operators — at most 100 characters, printable only; an over-length label or one containing control characters is rejected with `400`. It is stored as-is, returned in the create and list responses, recorded (sanitised) in the creation audit event, and is never part of the token secret or its lookup key. It cannot be edited after mint, and a rotated token does not inherit it.
 
 **Authentication:** Required  
 **Required permission:** `registration:create-token`

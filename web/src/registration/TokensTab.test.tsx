@@ -391,6 +391,17 @@ describe('TokensTab — status badges', () => {
 // ── Mint ──────────────────────────────────────────────────────────────────────
 
 describe('TokensTab — mint', () => {
+  it('states the 15-minute default lifetime in the expires-in label', async () => {
+    fetchMock.mockResolvedValue(makeTokensResponse([]))
+    renderTab()
+    await waitFor(() => expect(screen.getByTestId('mint-form')).toBeInTheDocument())
+    const input = screen.getByTestId('mint-expires-in')
+    const label = document.querySelector(`label[for="${input.id}"]`)
+    expect(label).not.toBeNull()
+    expect(label).toHaveTextContent('15 minutes')
+    expect(label).not.toHaveTextContent(/never/i)
+  })
+
   it('renders a mint form in the empty state', async () => {
     fetchMock.mockResolvedValue(makeTokensResponse([]))
     renderTab()

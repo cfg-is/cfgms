@@ -22,6 +22,7 @@ import (
 	"time"
 
 	certbundle "github.com/cfgis/cfgms/pkg/cert/bundle"
+	"github.com/cfgis/cfgms/pkg/registration"
 	"github.com/cfgis/cfgms/pkg/security"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -916,4 +917,27 @@ func TestGetAPIClient_BundleAbsent_FailsWithNoCredential(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, client)
 	assert.ErrorIs(t, err, errNoCredential)
+}
+
+// TestTokenCreateHelp_StatesDefaultExpiry ties the `cfg token create` help to
+// the server default lifetime so the two cannot drift apart silently.
+func TestTokenCreateHelp_StatesDefaultExpiry(t *testing.T) {
+	// The help says "15 minutes" literally; if the server default changes this
+	// fails until the help text is updated.
+	require.Equal(t, 15*time.Minute, registration.DefaultTokenTTL,
+		"server default token lifetime changed: update the cfg token help text")
+
+	long := strings.ToLower(tokenCreateCmd.Long)
+	assert.NotContains(t, long, "never expires")
+	assert.Contains(t, tokenCreateCmd.Long, "15 minutes")
+	assert.Contains(t, tokenCreateCmd.Long, "--expires=30d")
+
+	flag := tokenCreateCmd.Flags().Lookup("expires")
+	require.NotNil(t, flag)
+	assert.Contains(t, flag.Usage, "15 minutes")
+
+	parent := strings.ToLower(tokenCmd.Long)
+	assert.NotContains(t, parent, "time-limited (optional)")
+	assert.NotContains(t, parent, "never expires")
+	assert.Contains(t, tokenCmd.Long, "15 minutes")
 }

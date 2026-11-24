@@ -296,7 +296,7 @@ function MintForm({ tenantId, onMinted, onReload }: MintFormProps) {
         />
       </div>
       <div className="wf-field">
-        <label htmlFor="mint-expires-in">Expires in (optional, e.g. 30d)</label>
+        <label htmlFor="mint-expires-in">Expires in (optional; default 15 minutes, e.g. 30d for a longer-lived token)</label>
         <input
           id="mint-expires-in"
           type="text"
