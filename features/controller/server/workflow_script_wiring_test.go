@@ -21,8 +21,9 @@ import (
 // for the workflow script step (Issue #5851): the engine New builds must carry the
 // script executor, built over the controller's execution queue. It is observed
 // through behaviour: a restricted run of a script step must get past "no
-// executor" and stop at the executor's own fail-closed refusal (no approver is
-// wired until the approver adapter's story lands), with nothing queued.
+// executor" and stop at the installed approver's fail-closed denial (the run
+// tenant and script do not exist), with nothing queued. The approved path is
+// covered by TestServer_New_InstallsScriptApprover_*.
 func TestServer_New_WiresWorkflowScriptExecutor(t *testing.T) {
 	logger := logging.NewNoopLogger()
 
@@ -84,8 +85,10 @@ func TestServer_New_WiresWorkflowScriptExecutor(t *testing.T) {
 	assert.Equal(t, workflow.StatusFailed, exec.GetStatus())
 	assert.NotContains(t, exec.GetError(), "script executor not configured",
 		"the production engine must have the script executor")
-	assert.Contains(t, exec.GetError(), "no script approver",
-		"the executor refuses a restricted step until an approver is wired")
+	assert.NotContains(t, exec.GetError(), "no script approver",
+		"controller startup must install the script approver")
+	assert.Contains(t, exec.GetError(), "could not be approved",
+		"the installed approver denies a script that does not exist for the run tenant")
 	assert.Zero(t, srv.executionQueue.GetTotalQueueDepth(), "nothing was queued")
 
 	// The unrestricted path refuses a script step before anything starts.

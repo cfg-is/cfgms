@@ -2716,6 +2716,7 @@ func (w *apiWiring) wireWorkflow() error {
 		Fleet:      controllerFleet.NewMemoryQuery(&serverFleetStewardProvider{svc: s.controllerService}),
 
 		VerifyPublication: s.httpServer.VerifyWorkflowPublication,
+		ScriptApprover:    s.httpServer.AutomationScriptApprover(),
 	})
 	w.workflowHandler = workflowHandler
 	// Issue #5562: converge the tenants' declared m365-entra-user/-group resources
@@ -3190,6 +3191,11 @@ type workflowScriptDeps struct {
 	// by tenantID (api.Server.VerifyWorkflowPublication). Without it no script step
 	// runs outside an automation grant.
 	VerifyPublication func(ctx context.Context, tenantID string, vw *workflow.VersionedWorkflow) error
+	// ScriptApprover is the content-approval approver a script step of a restricted
+	// (grant-started) execution asks before it queues a library script
+	// (api.Server.AutomationScriptApprover). When nil it stays nil on the executor, so
+	// the engine's fail-closed refusal still applies.
+	ScriptApprover workflow.ScriptApprover
 }
 
 // newWorkflowScriptExecutor builds the script step executor from the queue,
@@ -3200,6 +3206,9 @@ func newWorkflowScriptExecutor(deps workflowScriptDeps) *workflownodes.ScriptSte
 	executor := workflownodes.NewScriptStepExecutor(scriptRepoForQueue(deps.Library), deps.Monitor, deps.KeyManager)
 	executor.SetExecutionQueue(deps.Queue)
 	executor.SetFleetQuery(deps.Fleet)
+	if deps.ScriptApprover != nil {
+		executor.SetApprover(deps.ScriptApprover)
+	}
 	return executor
 }
 
@@ -3246,9 +3255,10 @@ func initializeWorkflowHandler(
 	// The script step queues library scripts through the execution queue. The
 	// executor is always built and always passed, so a script step reaches the
 	// engine's own fail-closed refusals (no approver, no queue) rather than "no
-	// executor". No approver is set here: the approver adapter over the content
-	// approval evaluator is wired by its own story, until which a script step
-	// refuses to run.
+	// executor". The content-approval approver (scriptDeps.ScriptApprover) is
+	// installed on the executor here, before NewEngine, so no run can start
+	// without it; it resolves the script library, tenant manager and approval
+	// store lazily at each decision and denies when any is missing.
 	scriptExecutor := newWorkflowScriptExecutor(scriptDeps)
 	engineOpts = append(engineOpts, workflow.WithScriptStepExecutor(scriptExecutor))
 	// A script step runs outside an automation grant only from a version a human
