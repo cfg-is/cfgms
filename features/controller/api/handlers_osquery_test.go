@@ -579,3 +579,80 @@ func TestHandleOsqueryQuery_AuditEmitted(t *testing.T) {
 	assert.Equal(t, "host_info", entry.Details["catalog_id"], "catalog query ID must be recorded")
 	assert.Equal(t, "steward-audit", entry.Details["steward_0"], "steward target must be recorded")
 }
+
+// endRequestOsqueryDispatcher ends the request (cancels its context) while the
+// fan-out is in progress, the way a client disconnect does, then answers.
+type endRequestOsqueryDispatcher struct {
+	endRequest context.CancelFunc
+}
+
+func (d *endRequestOsqueryDispatcher) QuerySteward(_ context.Context, _, _ string, _ map[string]string) ([]*transportpb.OsqueryRow, error) {
+	d.endRequest()
+	return []*transportpb.OsqueryRow{{Columns: map[string]string{"hostname": "h"}}}, nil
+}
+
+// TestHandleOsqueryQuery_AuditRecordedWhenRequestEndsDuringFanOut verifies that
+// a dispatched query always has its osquery.query.dispatch record, also when the
+// client has gone away before the fan-out finishes. Before the audit write used
+// a context detached from the request, the enqueue raced the already-cancelled
+// request context and abandoned roughly half of the records, so each round
+// below fails on that code with probability 1/2 and the loop makes a pass by
+// luck practically impossible.
+func TestHandleOsqueryQuery_AuditRecordedWhenRequestEndsDuringFanOut(t *testing.T) {
+	const rounds = 64
+	server := setupTestServer(t)
+	server.fleetQuery = fleetWithStewardIDs("steward-a", "steward-b")
+	principal := osqueryStrongPrincipal()
+	body := osqueryQueryRequest{CatalogID: "host_info", Selector: "all"}
+
+	for i := 0; i < rounds; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		server.SetOsqueryDispatcher(&endRequestOsqueryDispatcher{endRequest: cancel})
+
+		req := makeOsqueryRequest(t, server, body, principal)
+		req = req.WithContext(context.WithValue(ctx, principalContextKey, principal))
+		req = req.WithContext(withCallerTenant(req.Context(), principal.TenantID))
+		rec := httptest.NewRecorder()
+		server.requirePermission("osquery", "execute")(http.HandlerFunc(server.handleOsqueryQuery)).ServeHTTP(rec, req)
+		cancel()
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		require.Error(t, ctx.Err(), "the request must have ended during the fan-out")
+
+		entries := auditEntriesByAction(t, server, "osquery.query.dispatch")
+		require.Len(t, entries, i+1, "round %d: every dispatched query must have exactly one audit record", i)
+		last := entries[len(entries)-1]
+		for _, e := range entries {
+			if e.Timestamp.After(last.Timestamp) {
+				last = e
+			}
+		}
+		assert.Equal(t, principal.ID, last.UserID, "the record must name the acting principal")
+		assert.Equal(t, "host_info", last.Details["catalog_id"])
+		assert.Equal(t, "2", last.Details["target_count"])
+	}
+}
+
+// TestHandleOsqueryQuery_RefusedRequestWritesNoDispatchRecord verifies that
+// requests refused before dispatch (validation, unknown catalog entry, missing
+// selector) write no osquery.query.dispatch record.
+func TestHandleOsqueryQuery_RefusedRequestWritesNoDispatchRecord(t *testing.T) {
+	server := setupTestServer(t)
+	disp := &stubOsqueryDispatcher{}
+	server.SetOsqueryDispatcher(disp)
+	server.fleetQuery = fleetWithStewardIDs("steward-1")
+
+	for name, body := range map[string]osqueryQueryRequest{
+		"missing catalog id": {Selector: "all"},
+		"unknown catalog id": {CatalogID: "no_such_entry", Selector: "all"},
+		"missing selector":   {CatalogID: "host_info"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			req := makeOsqueryRequest(t, server, body, osqueryStrongPrincipal())
+			rec := httptest.NewRecorder()
+			server.requirePermission("osquery", "execute")(http.HandlerFunc(server.handleOsqueryQuery)).ServeHTTP(rec, req)
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Empty(t, dispatchedStewardIDs(disp))
+			assert.Empty(t, auditEntriesByAction(t, server, "osquery.query.dispatch"))
+		})
+	}
+}
