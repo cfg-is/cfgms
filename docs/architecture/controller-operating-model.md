@@ -2037,7 +2037,7 @@ The controller is the certificate authority and identity provider for stewards. 
 
 **Perennial registration tokens**
 - Generated via REST API or `cfg token create --expires=<duration>`
-- Scoped to tenant/group, with optional expiry
+- Scoped to tenant/group; every token expires (15 minutes by default, longer via `--expires`)
 - Survive multiple registrations (never consumed on use); rotate with `cfg token rotate` to atomically invalidate all prior tokens and issue a fresh one
 - Suitable for: manual onboarding, small fleets, time-bounded provisioning
 

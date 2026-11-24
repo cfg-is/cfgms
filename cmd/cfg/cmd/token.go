@@ -35,7 +35,8 @@ var tokenCmd = &cobra.Command{
 
 Registration tokens are short API key-style strings that stewards use to
 auto-register with the controller. Tokens are perennial (survive multiple
-registrations), time-limited (optional), and revocable.
+registrations until they expire or are revoked), always time-limited (15 minutes
+by default; use --expires for longer) and revocable. There is no no-expiry value.
 
 Use 'cfg token rotate' to atomically replace the active token for a
 tenant/group with a fresh one, invalidating the old one immediately.
@@ -70,15 +71,24 @@ var tokenCreateCmd = &cobra.Command{
 
 The token will be a bare base32-encoded string (e.g., abcdefghijklmnopqrstuvwxyz)
 that stewards can use to auto-register with the controller. Tokens are perennial:
-they survive multiple registrations until explicitly revoked or rotated.
+they can be used for multiple registrations until they expire or are explicitly
+revoked or rotated.
 
-Expiration formats:
+Every token expires. If --expires is omitted or empty, the token lasts 15 minutes.
+There is no no-expiry value, so for a fleet rollout that enrolls stewards over
+days or weeks, set a longer lifetime explicitly.
+
+Expiration formats (a Go duration or a whole number of days):
+  - "30m" = 30 minutes
   - "24h" = 24 hours
   - "7d" = 7 days
   - "30d" = 30 days
-  - "" (empty) = never expires
+  - "" (empty) = default of 15 minutes
 
 Examples:
+  # Long-lived token for a fleet rollout
+  cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --expires=30d
+
   # 7-day expiring token
   cfg token create --tenant-id=acme-corp --controller-url=controller.acme.com:4433 --expires=7d
 
@@ -176,7 +186,7 @@ func init() {
 	tokenCreateCmd.Flags().StringVar(&tokenTenantID, "tenant-id", "", "Tenant ID (required)")
 	tokenCreateCmd.Flags().StringVar(&tokenControllerURL, "controller-url", "", "Controller transport URL for steward connections (required)")
 	tokenCreateCmd.Flags().StringVar(&tokenGroup, "group", "", "Optional group identifier")
-	tokenCreateCmd.Flags().StringVar(&tokenExpiresIn, "expires", "", "Expiration duration (e.g., 24h, 7d, 30d)")
+	tokenCreateCmd.Flags().StringVar(&tokenExpiresIn, "expires", "", "Expiration duration (e.g., 24h, 7d, 30d); default 15 minutes if omitted")
 	tokenCreateCmd.Flags().BoolVar(&tokenJSONOutput, "json", false, "Emit JSON output instead of human-readable text")
 
 	_ = tokenCreateCmd.MarkFlagRequired("tenant-id")

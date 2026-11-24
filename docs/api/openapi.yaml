@@ -125,6 +125,7 @@ paths:
                   description: Optional free-text description. At most 100 characters, printable only (control characters are rejected). Empty is allowed. Never part of the token secret.
                 expires_in:
                   type: string
+                  description: Optional token lifetime. A Go duration (for example `30m`, `24h`) or a whole number of days (for example `7d`, `30d`). When omitted or empty the token expires 15 minutes after creation. There is no no-expiry value; set a longer lifetime explicitly for a long-running rollout.
       responses:
         '201':
           description: Token created
