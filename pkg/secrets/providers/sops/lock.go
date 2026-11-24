@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/cfgis/cfgms/pkg/atomicfile"
 )
 
 const (
@@ -19,19 +21,13 @@ const (
 	// relative to the resolved lock root.
 	casLockSubdir = ".cas-locks"
 
-	// casLockAcquireTimeout bounds how long CompareAndSwapSecret waits for a
-	// contended lock before giving up.
+	// casLockAcquireTimeout bounds a lack of progress, not total queueing time: a
+	// waiter fails closed when the holder ahead of it has not released within this
+	// long. Waiting behind holders that keep releasing is not a timeout.
 	casLockAcquireTimeout = 5 * time.Second
-
-	// casLockPollInterval is the spin-wait interval between lock attempts.
-	casLockPollInterval = 5 * time.Millisecond
-
-	// casLockStaleAfter is how long an unreleased lock file is honoured before a
-	// waiter treats its holder as crashed and steals it. Without this, a process
-	// that dies mid-critical-section would deadlock every future
-	// CompareAndSwapSecret call on that key forever.
-	casLockStaleAfter = 30 * time.Second
 )
+
+var errCASLockTimeout = errors.New("timed out waiting for compare-and-swap lock")
 
 // errNoCASLockRoot reports that no lock directory could be derived from the
 // backend configuration. It is deliberately fatal to the CompareAndSwapSecret
@@ -78,46 +74,29 @@ func lockFilePath(dir, tenantID, key string) string {
 	return filepath.Join(dir, hex.EncodeToString(h[:])+".lock")
 }
 
-// isRetryableCASLockError reports whether err from the O_CREATE|O_EXCL acquire
-// attempt means "someone else holds the lock" — so the caller should keep polling
-// — as opposed to a genuine hard failure such as permission denied on the lock
-// directory itself or a vanished parent directory. os.IsExist covers the ordinary
-// EEXIST/ERROR_FILE_EXISTS case on every platform; isWindowsPendingDeleteAccessDenied
-// covers the Windows-only ERROR_ACCESS_DENIED a lock file mid-delete returns for the
-// same overlap (see acquireCASLock).
-func isRetryableCASLockError(err error) bool {
-	return os.IsExist(err) || isWindowsPendingDeleteAccessDenied(err)
-}
-
 // acquireCASLock acquires a real, cross-process mutual-exclusion lock scoped to
-// one tenant+key pair, using atomic O_CREATE|O_EXCL file creation — guaranteed
-// atomic by the OS on every platform CFGMS targets. The caller must call the
-// returned release func exactly once to release the lock.
+// one tenant+key pair. An in-process FIFO queue orders the goroutines of this
+// process, and only the head takes the OS advisory lock (flock on Unix,
+// LockFileEx on Windows) on a persistent per-key lock file, through
+// atomicfile.QueuedLockFile. The kernel releases that lock when the holder
+// process exits, so there is no stale-lock steal, and the lock file is never
+// deleted. The wait is bounded by casLockAcquireTimeout of no progress, not of
+// total queueing time. It fails closed: a timeout, a cancelled context or a lock
+// directory that cannot be created returns an error and no release func. The
+// caller must call the returned release func exactly once.
 func acquireCASLock(ctx context.Context, dir, tenantID, key string) (func(), error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("failed to create compare-and-swap lock directory: %w", err)
 	}
-	path := lockFilePath(dir, tenantID, key)
-	deadline := time.Now().Add(casLockAcquireTimeout)
-	for {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //#nosec G304 -- path derived from configured storage root, hashed key
-		if err == nil {
-			_ = f.Close()
-			return func() { _ = os.Remove(path) }, nil
+	release, err := atomicfile.QueuedLockFile(ctx, lockFilePath(dir, tenantID, key), casLockAcquireTimeout)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
 		}
-		if !isRetryableCASLockError(err) {
-			return nil, fmt.Errorf("failed to acquire compare-and-swap lock: %w", err)
+		if errors.Is(err, atomicfile.ErrLockNoProgress) {
+			return nil, errCASLockTimeout
 		}
-		if info, statErr := os.Stat(path); statErr == nil && time.Since(info.ModTime()) > casLockStaleAfter {
-			_ = os.Remove(path) // abandoned lock (holder crashed); steal it on the next iteration
-		}
-		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("timed out waiting for compare-and-swap lock")
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(casLockPollInterval):
-		}
+		return nil, fmt.Errorf("failed to acquire compare-and-swap lock: %w", err)
 	}
+	return release, nil
 }

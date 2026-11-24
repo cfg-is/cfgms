@@ -368,7 +368,7 @@ func (s *SOPSSecretStore) writeSecretEntry(ctx context.Context, req *secretsif.S
 //
 // It is false for a file-lock-coordinated backend. That lock is a genuine
 // cross-process lock and is correct for two processes on one host sharing a
-// directory, but O_CREAT|O_EXCL is not dependably atomic over a network
+// directory, but a local OS advisory lock is not dependably honoured over a network
 // filesystem, so it must not be presented to a caller as a cluster guarantee.
 // Callers that need the cluster property gate on this rather than assuming it
 // (Issue #3775).

@@ -278,7 +278,7 @@ func TestCompareAndSwapSecret_ExpiredTakeoverHasOneWinner(t *testing.T) {
 // TestCompareAndSwapIsClusterAtomic_FalseForFileLockBackend pins the honesty of the
 // capability report. A flatfile-backed store coordinates via an OS file lock, which
 // is correct for processes sharing one host's directory but is not a cross-node
-// guarantee — O_CREAT|O_EXCL is not dependably atomic over a network filesystem — so
+// guarantee — a local OS advisory lock is not dependably honoured over a network filesystem — so
 // it must report false and let the cluster-mode gate refuse it.
 func TestCompareAndSwapIsClusterAtomic_FalseForFileLockBackend(t *testing.T) {
 	base := t.TempDir()
