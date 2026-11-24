@@ -579,7 +579,9 @@ func TestTriggerManagerImpl_DeleteTrigger(t *testing.T) {
 
 func TestTriggerManagerImpl_GetTrigger(t *testing.T) {
 	h := newTriggerHarness(t)
-	ctx := contextWithTenant("tenant-test")
+	// A principal on the context makes the created trigger owned; without one it
+	// is reported as ownerless (see TestTriggers_OwnerlessMarkedOnReadOnly).
+	ctx := contextWithTenantAndPrincipal("tenant-test", "test-principal")
 
 	trigger := &Trigger{
 		ID:           "test-1",
@@ -1591,4 +1593,129 @@ func TestTriggerManagerImpl_DisableEnable_SIEMAndWebhook(t *testing.T) {
 	assert.Eventually(t, func() bool {
 		return executionsFor("siem-workflow") > 0 && executionsFor("webhook-workflow") > 0
 	}, 5*time.Second, 10*time.Millisecond, "re-enabled triggers must start workflows again")
+}
+
+// ---------------------------------------------------------------------------
+// Trigger owner record (CreatedBy / UpdatedBy / Ownerless)
+// ---------------------------------------------------------------------------
+
+func contextWithTenantAndPrincipal(tenantID, principal string) context.Context {
+	return context.WithValue(contextWithTenant(tenantID), ctxkeys.UserIDKey, principal)
+}
+
+// TestTriggers_RecordOwner guards the owner record: CreatedBy comes from the
+// authenticated principal (a body-supplied value is ignored), an update keeps
+// CreatedBy and sets UpdatedBy, and both survive a reload from the trigger store.
+func TestTriggers_RecordOwner(t *testing.T) {
+	h := newTriggerHarness(t)
+	const tenant = "tenant-owner"
+	creatorCtx := contextWithTenantAndPrincipal(tenant, "alice")
+	updaterCtx := contextWithTenantAndPrincipal(tenant, "bob")
+
+	newBody := func() *Trigger {
+		return &Trigger{
+			ID:           "owned-1",
+			Name:         "Owned",
+			Type:         TriggerTypeSchedule,
+			Status:       TriggerStatusActive,
+			WorkflowName: "wf-owned",
+			CreatedBy:    "mallory", // must be ignored
+			UpdatedBy:    "mallory",
+			Ownerless:    true,
+			Schedule:     &ScheduleConfig{CronExpression: "0 2 * * *", Enabled: true},
+		}
+	}
+
+	require.NoError(t, h.manager.CreateTrigger(creatorCtx, newBody()))
+
+	got, err := h.manager.GetTrigger(creatorCtx, "owned-1")
+	require.NoError(t, err)
+	assert.Equal(t, "alice", got.CreatedBy, "CreatedBy must come from the context principal, not the body")
+	assert.Equal(t, "alice", got.UpdatedBy)
+	assert.False(t, got.Ownerless)
+
+	// Update: the body is a fresh Trigger with no owner and a spoofed CreatedBy.
+	update := newBody()
+	update.Name = "Owned v2"
+	update.CreatedBy = "mallory"
+	require.NoError(t, h.manager.UpdateTrigger(updaterCtx, update))
+
+	got, err = h.manager.GetTrigger(creatorCtx, "owned-1")
+	require.NoError(t, err)
+	assert.Equal(t, "alice", got.CreatedBy, "an update must preserve CreatedBy")
+	assert.Equal(t, "bob", got.UpdatedBy, "an update must record the updating principal")
+
+	// A status change is an update by its caller too.
+	require.NoError(t, h.manager.DisableTrigger(contextWithTenantAndPrincipal(tenant, "carol"), "owned-1"))
+	got, err = h.manager.GetTrigger(creatorCtx, "owned-1")
+	require.NoError(t, err)
+	assert.Equal(t, "alice", got.CreatedBy)
+	assert.Equal(t, "carol", got.UpdatedBy)
+	require.NoError(t, h.manager.EnableTrigger(updaterCtx, "owned-1"))
+
+	// Reload from the store with a fresh manager (simulated restart).
+	reloaded := &TriggerManagerImpl{
+		logger:       logging.ForModule("workflow.trigger.manager.test"),
+		triggerStore: h.triggerStore,
+		secretStore:  h.secretStore,
+		triggers:     make(map[string]*Trigger),
+		executions:   make(map[string]*TriggerExecution),
+	}
+	require.NoError(t, reloaded.loadTriggersFromStorage(creatorCtx))
+	restored, ok := reloaded.triggers["owned-1"]
+	require.True(t, ok, "trigger must be present after reload")
+	assert.Equal(t, "alice", restored.CreatedBy, "CreatedBy must survive a reload")
+	assert.Equal(t, "bob", restored.UpdatedBy, "UpdatedBy must survive a reload")
+	assert.False(t, restored.Ownerless, "the ownerless marker is computed, never stored")
+}
+
+// TestTriggers_OwnerlessMarkedOnReadOnly guards that a trigger stored before
+// ownership was recorded keeps its place in the manager and is reported as
+// ownerless on Get and List, without the marker mutating stored state.
+func TestTriggers_OwnerlessMarkedOnReadOnly(t *testing.T) {
+	h := newTriggerHarness(t)
+	const tenant = "tenant-legacy"
+	// No principal on the context: the trigger has no recorded creator, exactly
+	// like one stored by a release that never set CreatedBy.
+	ctx := contextWithTenant(tenant)
+
+	require.NoError(t, h.manager.CreateTrigger(ctx, &Trigger{
+		ID:           "legacy-1",
+		Name:         "Legacy",
+		Type:         TriggerTypeSchedule,
+		Status:       TriggerStatusActive,
+		WorkflowName: "wf-legacy",
+		Schedule:     &ScheduleConfig{CronExpression: "0 2 * * *", Enabled: true},
+	}))
+	require.NoError(t, h.manager.CreateTrigger(contextWithTenantAndPrincipal(tenant, "alice"), &Trigger{
+		ID:           "owned-2",
+		Name:         "Owned",
+		Type:         TriggerTypeSchedule,
+		Status:       TriggerStatusActive,
+		WorkflowName: "wf-owned",
+		Schedule:     &ScheduleConfig{CronExpression: "0 3 * * *", Enabled: true},
+	}))
+
+	got, err := h.manager.GetTrigger(ctx, "legacy-1")
+	require.NoError(t, err)
+	assert.True(t, got.Ownerless)
+	assert.Contains(t, h.scheduler.GetScheduledTriggers(), "legacy-1", "an ownerless trigger keeps firing")
+
+	listed, err := h.manager.ListTriggers(ctx, nil)
+	require.NoError(t, err)
+	flags := map[string]bool{}
+	for _, tr := range listed {
+		flags[tr.ID] = tr.Ownerless
+	}
+	assert.Equal(t, map[string]bool{"legacy-1": true, "owned-2": false}, flags)
+
+	// The marker lives on the returned copy only.
+	h.manager.mutex.RLock()
+	stored := h.manager.triggers["legacy-1"]
+	h.manager.mutex.RUnlock()
+	assert.False(t, stored.Ownerless, "listing must not mutate stored state")
+
+	record, err := h.triggerStore.GetTrigger(ctx, "legacy-1")
+	require.NoError(t, err)
+	assert.NotContains(t, string(record.ConfigPayload), "ownerless", "the marker must not be persisted")
 }

@@ -225,3 +225,27 @@ cfg workflow promote-hv-role MyVM hv01 --cluster fc-east --url=https://controlle
 | `--server-name` | — | Override TLS server name for certificate verification |
 
 ---
+
+## Workflow Triggers
+
+A trigger starts a workflow later, on a schedule, on a webhook or on a SIEM event, with no one present. The `cfg` CLI has no trigger command; triggers are managed in the web console and through the `/api/v1/triggers` routes, which require the `trigger:manage` permission.
+
+A trigger is a persistent way to run a workflow, so the controller holds trigger changes to the same bar as running the workflow once:
+
+| Action | Route | Presence tap | `workflow:execute` |
+|---|---|---|---|
+| Create | `POST /api/v1/triggers` | Required | Required |
+| Update (re-target or re-schedule) | `PUT /api/v1/triggers/{id}` | Required | Required |
+| Enable | `POST /api/v1/triggers/{id}/enable` | Required | Not checked |
+| Run now | `POST /api/v1/triggers/{id}/execute` | Required | Required |
+| Disable | `POST /api/v1/triggers/{id}/disable` | Not required | Not checked |
+| Delete | `DELETE /api/v1/triggers/{id}` | Not required | Not checked |
+| Read (list, get, executions, health) | `GET` | Not required | Not checked |
+
+- A human session needs strong assurance for every trigger route. The presence tap is a passkey assertion, asked for through the same step-up prompt as other tapped actions. Disable, delete and reads take no tap because stopping or removing automation is a de-escalation and a read changes nothing; they still need a strong session.
+- `trigger:manage` alone is not enough to create, update or run a trigger: the caller must also hold `workflow:execute`. A caller without it is refused with `403`, and the refusal does not say whether the named workflow exists. The tap is checked first, so a caller without `workflow:execute` has already spent a tap.
+- A scoped API key is never asked for a tap, as for `workflow:execute`, and still needs both permissions.
+- Every trigger records the principal that created it (`created_by`) and the principal that last updated it (`updated_by`; an update, enable or disable sets it). Both come from the authenticated caller; a `created_by` in a request body is ignored and an update keeps the original creator.
+- Triggers created before the owner was recorded have no `created_by`. They keep firing, and `GET /api/v1/triggers` and `GET /api/v1/triggers/{id}` report them with `"ownerless": true`. The flag is computed on read and is not stored. Updating an ownerless trigger does not assign it an owner.
+
+A trigger fires the latest saved version of its workflow by name. Checking the owner's permission each time a trigger fires and pinning a trigger to a published version are not implemented.

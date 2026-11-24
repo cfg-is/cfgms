@@ -161,7 +161,57 @@ func (h *WorkflowHandler) RegisterTriggerRoutes(router *mux.Router) {
 		return
 	}
 	router.Use(h.triggerTenantMiddleware)
+	router.Use(h.triggerWorkflowExecuteMiddleware)
 	h.triggerAPI.RegisterRoutes(router)
+}
+
+// triggerNeedsWorkflowExecute reports whether a trigger route starts or arms a
+// workflow run and so needs workflow:execute on top of trigger:manage: creating a
+// trigger, re-targeting or re-scheduling one (PUT), and running one on demand.
+// Enable is a presence-tap route but does not name a new target, so it is not
+// listed; delete, disable and the reads de-escalate or change nothing.
+func triggerNeedsWorkflowExecute(method, pathTemplate string) bool {
+	switch method {
+	case http.MethodPost:
+		return strings.HasSuffix(pathTemplate, "/triggers") || strings.HasSuffix(pathTemplate, "/triggers/{id}/execute")
+	case http.MethodPut:
+		return strings.HasSuffix(pathTemplate, "/triggers/{id}")
+	}
+	return false
+}
+
+// triggerWorkflowExecuteMiddleware requires the caller to hold workflow:execute
+// for the trigger routes that create, re-target or run a trigger. A trigger is a
+// persistent way to run a workflow later, so holding trigger:manage alone must not
+// be enough to start one. The permission is the caller's, resolved through the same
+// tenant chain triggerTenantMiddleware and the tenant-isolation check already
+// enforced. The refusal never looks up the named workflow, so its body is the same
+// whether or not the workflow exists and reveals nothing about other tenants. It
+// fails closed while no permission check is wired and when the matched route
+// cannot be read for a mutating method.
+//
+// It runs after requirePermission, so a caller who lacks workflow:execute has
+// already spent a presence tap.
+func (h *WorkflowHandler) triggerWorkflowExecuteMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gated := false
+		route := mux.CurrentRoute(r)
+		var tmpl string
+		if route != nil {
+			tmpl, _ = route.GetPathTemplate()
+		}
+		if tmpl == "" {
+			gated = r.Method == http.MethodPost || r.Method == http.MethodPut
+		} else {
+			gated = triggerNeedsWorkflowExecute(r.Method, tmpl)
+		}
+		if gated && (h.holdsPermissionFn == nil || !h.holdsPermissionFn(r, "workflow:execute")) {
+			h.logger.Warn("Trigger request refused: caller lacks workflow:execute")
+			h.sendError(w, http.StatusForbidden, "forbidden: workflow:execute is required to create, change or run a trigger")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // triggerTenantMiddleware resolves the tenant a trigger request operates on

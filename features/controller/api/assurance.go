@@ -315,6 +315,30 @@ var permissionAssurance = map[string]Requirement{
 	"workflow:write":   {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true},
 	"workflow:execute": {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true},
 
+	// A trigger is a persistent way to run a workflow later without the person present, so
+	// creating, re-targeting, re-scheduling, enabling or manually running one takes the same
+	// tap as running the workflow (Issue #6488). Classification is per permission ID, so every
+	// route under /api/v1/triggers shares this entry: delete, disable and the reads are the
+	// only routes exempt from the tap (stopping or removing automation is a de-escalation, and
+	// reads change nothing) but still need a Strong session. Machine principals are treated as
+	// for workflow:execute. The routes are registered by SetWorkflowHandler after New() has
+	// validated the exemptions, so this permission is validated there
+	// (latePresenceExemptPermissions). The workflow:execute check for create, update and
+	// manual execute lives in WorkflowHandler.triggerWorkflowExecuteMiddleware.
+	"trigger:manage": {
+		Min:                 session.AssuranceStrong,
+		RequireUserPresence: true,
+		AllowMachine:        true,
+		PresenceExemptRoutes: []string{
+			"GET /api/v1/triggers/health",
+			"GET /api/v1/triggers",
+			"GET /api/v1/triggers/{id}",
+			"DELETE /api/v1/triggers/{id}",
+			"POST /api/v1/triggers/{id}/disable",
+			"GET /api/v1/triggers/{id}/executions",
+		},
+	},
+
 	"installer:upload":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // PUT /installer/artifacts/{platform}/{arch}
 	"installer:delete":          {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // DELETE /installer/artifacts/{platform}/{arch}
 	"installer:publish:steward": {Min: session.AssuranceStrong, RequireUserPresence: true, AllowMachine: true}, // steward binary publish (routes_steward_binaries.go)
@@ -404,10 +428,32 @@ func overrideAppliesTo(storedID, permissionID string) bool {
 	return false
 }
 
+// latePresenceExemptPermissions lists the permissions whose routes are registered
+// after New() has run validatePresenceExemptRoutes, by SetWorkflowHandler. Their
+// exemptions are validated by validateLatePresenceExemptRoutes once those routes
+// exist, so server construction does not fail on routes that are not registered
+// yet and a stale exemption is still caught.
+var latePresenceExemptPermissions = map[string]bool{
+	"trigger:manage": true, // routes registered by SetWorkflowHandler (Issue #6488)
+}
+
 // validatePresenceExemptRoutes walks the router and returns an error naming every
 // PresenceExemptRoutes entry that matches no registered route, so a renamed route
-// cannot leave a stale exemption behind.
+// cannot leave a stale exemption behind. Permissions in
+// latePresenceExemptPermissions are skipped: their routes are validated by
+// validateLatePresenceExemptRoutes after they are registered.
 func (s *Server) validatePresenceExemptRoutes() error {
+	return s.validatePresenceExemptRoutesFor(func(perm string) bool { return !latePresenceExemptPermissions[perm] })
+}
+
+// validateLatePresenceExemptRoutes validates the exemptions of the permissions in
+// latePresenceExemptPermissions. SetWorkflowHandler calls it after
+// RegisterTriggerRoutes when the trigger routes were registered.
+func (s *Server) validateLatePresenceExemptRoutes() error {
+	return s.validatePresenceExemptRoutesFor(func(perm string) bool { return latePresenceExemptPermissions[perm] })
+}
+
+func (s *Server) validatePresenceExemptRoutesFor(include func(perm string) bool) error {
 	registered := map[string]bool{}
 	if s.router != nil {
 		_ = s.router.Walk(func(route *mux.Route, _ *mux.Router, _ []*mux.Route) error {
@@ -427,6 +473,9 @@ func (s *Server) validatePresenceExemptRoutes() error {
 	}
 	var missing []string
 	for perm, req := range permissionAssurance {
+		if !include(perm) {
+			continue
+		}
 		for _, e := range req.PresenceExemptRoutes {
 			if !registered[e] {
 				missing = append(missing, fmt.Sprintf("%s: %q", perm, e))
