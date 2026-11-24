@@ -4,7 +4,7 @@ This guide covers the security properties of automation grants and pre-approved 
 
 Every script runs as SYSTEM on the endpoint. The question this design answers is which approval a script or workflow needs before it runs with no human tap. A pre-approved version can be run by an automation grant. Nothing else is available to a grant: it reads, and it runs pre-approved content.
 
-**Wiring status.** The controller composition root does not yet install the grant store, the script-step approver for restricted workflow runs or the tenant notify channel resolver. Until it does, grant routes answer `503`, a grant credential is refused with `401`, and a script step or notify step of a grant-started workflow refuses to run. The approval store, library modes, approvals and workflow publication are installed. The risks below describe the implemented behavior and apply once the grant store is wired.
+**Wiring status.** The controller composition root installs the grant store, the approval store, library modes, approvals, workflow publication and the script-step approver for restricted workflow runs, on every controller node. A grant-started run of a pinned, approved workflow queues a script step whose exact version is approved for the run tenant, and refuses one that is pending, changed or not approved; each refusal is recorded on the run with its reason. A missing approval store, script library or tenant manager makes the approver deny, so a script step fails closed. The tenant notify channel resolver is not installed: no tenant notify-channel registry exists yet, so a notify step of a grant-started workflow still refuses to run.
 
 ## What a grant can and cannot do
 
