@@ -133,10 +133,38 @@ type Collector struct {
 	hwCache     map[string]string
 
 	// Background collection — slow software/security data collected asynchronously.
-	bgOnce    sync.Once
-	bgDone    chan struct{} // closed when background collection completes
-	slowMu    sync.RWMutex
-	slowAttrs map[string]string
+	// The first run closes bgDone (exactly once, via bgDoneOnce); later runs are
+	// re-collections that replace slowAttrs atomically. slowMu guards slowAttrs;
+	// slowStateMu guards the single-flight and schedule state below.
+	bgDone     chan struct{} // closed when the first background collection completes
+	bgDoneOnce sync.Once
+	slowMu     sync.RWMutex
+	slowAttrs  map[string]string
+
+	slowInterval    time.Duration // minimum time between slow-collection attempts
+	slowStateMu     sync.Mutex
+	slowRunning     bool      // a slow collection is in progress (single-flight)
+	slowAttempted   bool      // at least one run has been started
+	slowLastAttempt time.Time // start time of the most recent run
+	slowCollectedAt time.Time // completion time of the last run whose result was kept
+}
+
+// DefaultSlowCollectionInterval is how often slow software and security
+// attributes are re-collected when WithSlowCollectionInterval is not used.
+const DefaultSlowCollectionInterval = 30 * time.Minute
+
+// slowCollectionTimeout bounds a single slow collection run.
+const slowCollectionTimeout = 5 * time.Minute
+
+// WithSlowCollectionInterval sets the minimum time between slow software and
+// security collection runs. A non-positive value keeps
+// DefaultSlowCollectionInterval.
+func WithSlowCollectionInterval(d time.Duration) CollectorOption {
+	return func(c *Collector) {
+		if d > 0 {
+			c.slowInterval = d
+		}
+	}
 }
 
 // NewCollector creates a new DNA collector.
@@ -147,8 +175,9 @@ type Collector struct {
 // host:* fragment collection per ADR-017 Amendment 3).
 func NewCollector(logger logging.Logger, opts ...CollectorOption) *Collector {
 	c := &Collector{
-		logger: logger,
-		bgDone: make(chan struct{}),
+		logger:       logger,
+		bgDone:       make(chan struct{}),
+		slowInterval: DefaultSlowCollectionInterval,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -202,18 +231,12 @@ func (c *Collector) Collect(ctx context.Context) (*commonpb.DNA, error) {
 	c.collectEnvironmentInfo(attributes)
 	c.logger.Debug("Environment info collected", "duration", time.Since(envStart))
 
-	// Start background goroutine for slow data on first call.
-	// Uses context.Background() with a generous timeout so the goroutine
-	// runs to completion even if the caller's context is short-lived.
-	c.bgOnce.Do(func() {
-		bgCtx, bgCancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		go func() {
-			defer bgCancel()
-			c.runBackgroundCollection(bgCtx)
-		}()
-	})
+	// Start the background goroutine for slow data on the first call, and again
+	// once the slow-collection interval has elapsed. Never blocks and never
+	// overlaps a run already in progress.
+	c.maybeStartSlowCollection()
 
-	// Merge background data if it has already completed.
+	// Merge the last completed background data, if any.
 	select {
 	case <-c.bgDone:
 		c.slowMu.RLock()
@@ -323,9 +346,45 @@ func stdlibModuleOwnership() map[string][]modules.OwnershipDeclaration {
 	}
 }
 
-// WaitForBackground blocks until the asynchronous background collection started
-// by the first Collect call has completed, or until ctx is cancelled. Background
-// collection is kicked off by Collect (via bgOnce), so callers must call Collect
+// SlowCollectedAt returns the completion time of the last slow software and
+// security collection whose result was kept, or the zero time before the first
+// run completes. A later run that ends with an expired or cancelled context
+// keeps the previous result and does not advance this time.
+func (c *Collector) SlowCollectedAt() time.Time {
+	c.slowStateMu.Lock()
+	defer c.slowStateMu.Unlock()
+	return c.slowCollectedAt
+}
+
+// maybeStartSlowCollection starts a slow collection goroutine when none is
+// running and either none has been attempted yet or the slow-collection
+// interval has elapsed since the last attempt started. It never blocks.
+//
+// The goroutine uses a fresh context.Background() with a bounded timeout so it
+// runs to completion even if the caller's context is short-lived.
+func (c *Collector) maybeStartSlowCollection() {
+	c.slowStateMu.Lock()
+	if c.slowRunning ||
+		(c.slowAttempted && time.Since(c.slowLastAttempt) < c.slowInterval) {
+		c.slowStateMu.Unlock()
+		return
+	}
+	first := !c.slowAttempted
+	c.slowRunning = true
+	c.slowAttempted = true
+	c.slowLastAttempt = time.Now()
+	c.slowStateMu.Unlock()
+
+	bgCtx, bgCancel := context.WithTimeout(context.Background(), slowCollectionTimeout)
+	go func() {
+		defer bgCancel()
+		c.runBackgroundCollection(bgCtx, first)
+	}()
+}
+
+// WaitForBackground blocks until the first asynchronous background collection
+// started by Collect has completed, or until ctx is cancelled. Background
+// collection is kicked off by Collect, so callers must call Collect
 // at least once before WaitForBackground for it to make progress; a second
 // Collect after this returns yields the merged full snapshot. It exists so that
 // external packages (e.g. integration tests) can wait for the full snapshot
@@ -378,8 +437,10 @@ func (c *Collector) RawAttributes(ctx context.Context) map[string]string {
 
 // runBackgroundCollection collects slow software and security data asynchronously.
 // Software and security run concurrently since they write to separate attribute keys.
-// It merges results into slowAttrs and closes bgDone when finished.
-func (c *Collector) runBackgroundCollection(ctx context.Context) {
+// It replaces slowAttrs atomically when finished and closes bgDone after the
+// first run. A re-run (first == false) that ends with its context expired or
+// cancelled keeps the previous result.
+func (c *Collector) runBackgroundCollection(ctx context.Context, first bool) {
 	c.logger.Debug("Starting background DNA collection (software + security)")
 	start := time.Now()
 
@@ -406,11 +467,26 @@ func (c *Collector) runBackgroundCollection(ctx context.Context) {
 		slowAttrs[k] = v
 	}
 
+	if ctxErr := ctx.Err(); ctxErr != nil && !first {
+		c.slowStateMu.Lock()
+		c.slowRunning = false
+		c.slowStateMu.Unlock()
+		c.logger.Warn("Background DNA re-collection did not complete; keeping previous slow attributes",
+			"error", logging.SanitizeLogValue(ctxErr.Error()),
+			"duration", time.Since(start))
+		return
+	}
+
 	c.slowMu.Lock()
 	c.slowAttrs = slowAttrs
 	c.slowMu.Unlock()
 
-	close(c.bgDone)
+	c.slowStateMu.Lock()
+	c.slowCollectedAt = time.Now()
+	c.slowRunning = false
+	c.slowStateMu.Unlock()
+
+	c.bgDoneOnce.Do(func() { close(c.bgDone) })
 	c.logger.Info("Background DNA collection completed",
 		"attributes", len(slowAttrs),
 		"duration", time.Since(start))
