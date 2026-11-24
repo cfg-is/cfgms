@@ -1668,7 +1668,7 @@ List devices quarantined at registration and awaiting approval. Approved, denied
 **Authentication:** Required  
 **Required permission:** `registration:list-pending`
 
-**Tenant scope:** a tenant-scoped caller sees only its own tenant's entries; an unscoped caller sees all tenants.
+**Tenant scope:** a tenant-scoped caller sees the entries of its own tenant and of every descendant tenant (an MSP sees its clients' pending stewards), ordered by registration time, oldest first. A tenant outside the caller's subtree is never listed, including one whose ID merely starts with the caller's ID. An unscoped caller sees all tenants. `POST /api/v1/registration/approve-all`, `POST /api/v1/registration/approve-by-cidr` and `GET /api/v1/registration/approve-by-cidr/preview` act on the same set: the caller's tenant plus its descendants.
 
 Each item:
 

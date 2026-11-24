@@ -458,3 +458,215 @@ func TestF3_IPTrustTenantScope(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 }
+
+// subtreeScopeFixture is a seeded tenant tree with one pending registration per tenant:
+//
+//	root
+//	├── msp-a
+//	│   └── client-a1
+//	│       └── site-a1
+//	├── msp-b
+//	│   └── client-b1
+//	└── msp-a-evil   (ID-prefix lookalike of msp-a, not in its subtree)
+type subtreeScopeFixture struct {
+	server       *Server
+	pendingStore business.PendingRegistrationStore
+	// pendingByTenant maps tenant ID to the pending ID seeded for it.
+	pendingByTenant map[string]string
+}
+
+func newSubtreeScopeFixture(t *testing.T) *subtreeScopeFixture {
+	t.Helper()
+	server, pendingStore, _, _ := newTenantScopeTestServer(t)
+
+	createTestTenant(t, server, "msp-a", "")
+	createTestTenant(t, server, "client-a1", "msp-a")
+	createTestTenant(t, server, "site-a1", "client-a1")
+	createTestTenant(t, server, "msp-b", "")
+	createTestTenant(t, server, "client-b1", "msp-b")
+	createTestTenant(t, server, "msp-a-evil", "")
+
+	f := &subtreeScopeFixture{server: server, pendingStore: pendingStore, pendingByTenant: map[string]string{}}
+	// Seeded out of subtree order, with distinct RegisteredAt values, so the merged
+	// list order is observable. All sources sit in 10.20.0.0/16.
+	base := time.Now().UTC().Add(-time.Hour)
+	seed := []struct {
+		tenant string
+		ip     string
+		offset time.Duration
+	}{
+		{"client-a1", "10.20.1.1", 3 * time.Minute},
+		{"msp-b", "10.20.2.1", 4 * time.Minute},
+		{"msp-a", "10.20.0.1", 1 * time.Minute},
+		{"msp-a-evil", "10.20.3.1", 5 * time.Minute},
+		{"site-a1", "10.20.1.2", 2 * time.Minute},
+		{"client-b1", "10.20.2.2", 6 * time.Minute},
+	}
+	for _, s := range seed {
+		id := "pending-" + s.tenant
+		f.pendingByTenant[s.tenant] = id
+		require.NoError(t, pendingStore.AddPending(context.Background(), &business.PendingRegistrationEntry{
+			PendingID:    id,
+			StewardID:    "steward-" + s.tenant,
+			TenantID:     s.tenant,
+			TokenStr:     "tok-" + s.tenant,
+			SourceIP:     s.ip,
+			RegisteredAt: base.Add(s.offset),
+			ExpiresAt:    time.Now().UTC().Add(24 * time.Hour),
+			Status:       business.PendingRegistrationStatusPending,
+		}))
+	}
+	return f
+}
+
+func (f *subtreeScopeFixture) listAs(t *testing.T, tenantID string) []PendingRegistration {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/registration/pending", nil)
+	if tenantID == "" {
+		req = withAdminPrincipal(req)
+	} else {
+		req = withScopedPrincipal(req, tenantID)
+	}
+	rec := httptest.NewRecorder()
+	f.server.handleListPendingRegistrations(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var entries []PendingRegistration
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &entries))
+	return entries
+}
+
+func (f *subtreeScopeFixture) statusOf(t *testing.T, tenant string) string {
+	t.Helper()
+	got, err := f.pendingStore.GetPendingByID(context.Background(), f.pendingByTenant[tenant])
+	require.NoError(t, err)
+	return got.Status
+}
+
+func pendingTenantIDs(entries []PendingRegistration) []string {
+	ids := make([]string, 0, len(entries))
+	for _, e := range entries {
+		ids = append(ids, e.TenantID)
+	}
+	return ids
+}
+
+// bulkRequest builds a bulk-approval request carrying the scoped caller and an acting principal.
+func bulkRequest(method, target, body, tenantID string) *http.Request {
+	req := httptest.NewRequest(method, target, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req = withScopedPrincipal(req, tenantID)
+	return req.WithContext(withActor(req.Context(), &Principal{ID: "operator-1", TenantID: tenantID}))
+}
+
+// TestPendingRegistrationSubtreeScope verifies the pending list and the bulk approval
+// verbs cover the caller's tenant subtree and nothing outside it.
+func TestPendingRegistrationSubtreeScope(t *testing.T) {
+	t.Run("msp caller lists its own tenant and descendants only, oldest first", func(t *testing.T) {
+		f := newSubtreeScopeFixture(t)
+		entries := f.listAs(t, "msp-a")
+		assert.Equal(t, []string{"msp-a", "site-a1", "client-a1"}, pendingTenantIDs(entries),
+			"msp-a sees msp-a, client-a1 and site-a1 ordered by RegisteredAt ascending; never msp-b, client-b1 or msp-a-evil")
+	})
+
+	t.Run("client caller sees only its own and descendant entries", func(t *testing.T) {
+		f := newSubtreeScopeFixture(t)
+		entries := f.listAs(t, "client-a1")
+		assert.Equal(t, []string{"site-a1", "client-a1"}, pendingTenantIDs(entries),
+			"client-a1 must not see its parent msp-a's entry")
+	})
+
+	t.Run("leaf caller sees only its own entry", func(t *testing.T) {
+		f := newSubtreeScopeFixture(t)
+		assert.Equal(t, []string{"site-a1"}, pendingTenantIDs(f.listAs(t, "site-a1")))
+	})
+
+	t.Run("lookalike tenant sees only itself", func(t *testing.T) {
+		f := newSubtreeScopeFixture(t)
+		assert.Equal(t, []string{"msp-a-evil"}, pendingTenantIDs(f.listAs(t, "msp-a-evil")))
+	})
+
+	t.Run("root caller still sees every tenant", func(t *testing.T) {
+		f := newSubtreeScopeFixture(t)
+		seen := map[string]bool{}
+		for _, e := range f.listAs(t, "") {
+			seen[e.TenantID] = true
+		}
+		for tenantID := range f.pendingByTenant {
+			assert.True(t, seen[tenantID], "root caller must see %s", tenantID)
+		}
+	})
+
+	t.Run("approve-by-cidr approves the subtree and leaves other tenants pending", func(t *testing.T) {
+		f := newSubtreeScopeFixture(t)
+		rec := httptest.NewRecorder()
+		f.server.handleApproveByCIDR(rec, bulkRequest(http.MethodPost, "/api/v1/registration/approve-by-cidr",
+			`{"cidr":"10.20.1.0/24"}`, "msp-a"))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		assert.Equal(t, business.PendingRegistrationStatusApproved, f.statusOf(t, "client-a1"))
+		assert.Equal(t, business.PendingRegistrationStatusApproved, f.statusOf(t, "site-a1"))
+		assert.Equal(t, business.PendingRegistrationStatusPending, f.statusOf(t, "msp-a"), "outside the CIDR")
+		assert.Equal(t, business.PendingRegistrationStatusPending, f.statusOf(t, "msp-b"))
+	})
+
+	t.Run("approve-by-cidr leaves a matching other-tenant entry pending", func(t *testing.T) {
+		f := newSubtreeScopeFixture(t)
+		rec := httptest.NewRecorder()
+		f.server.handleApproveByCIDR(rec, bulkRequest(http.MethodPost, "/api/v1/registration/approve-by-cidr",
+			`{"cidr":"10.20.0.0/16"}`, "msp-a"))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		for _, tenantID := range []string{"msp-a", "client-a1", "site-a1"} {
+			assert.Equal(t, business.PendingRegistrationStatusApproved, f.statusOf(t, tenantID), tenantID)
+		}
+		for _, tenantID := range []string{"msp-b", "client-b1", "msp-a-evil"} {
+			assert.Equal(t, business.PendingRegistrationStatusPending, f.statusOf(t, tenantID),
+				"%s matches the CIDR but is outside msp-a's subtree", tenantID)
+		}
+	})
+
+	t.Run("approve-by-cidr preview lists the same set the approval acts on", func(t *testing.T) {
+		f := newSubtreeScopeFixture(t)
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/v1/registration/approve-by-cidr/preview?cidr=10.20.0.0/16", nil)
+		req = withScopedPrincipal(req, "msp-a")
+		rec := httptest.NewRecorder()
+		f.server.handleApproveByCIDRPreview(rec, req)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var preview approveByCIDRPreviewResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &preview))
+		assert.Equal(t, []string{
+			f.pendingByTenant["msp-a"], f.pendingByTenant["site-a1"], f.pendingByTenant["client-a1"],
+		}, preview.PendingIDs)
+		assert.Equal(t, 3, preview.Count)
+	})
+
+	t.Run("approve-all approves the subtree and not other tenants", func(t *testing.T) {
+		f := newSubtreeScopeFixture(t)
+		rec := httptest.NewRecorder()
+		f.server.handleApproveAllRegistrations(rec, bulkRequest(http.MethodPost,
+			"/api/v1/registration/approve-all", "", "msp-a"))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+		var resp approveAllResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, 3, resp.Approved)
+		for _, tenantID := range []string{"msp-a", "client-a1", "site-a1"} {
+			assert.Equal(t, business.PendingRegistrationStatusApproved, f.statusOf(t, tenantID), tenantID)
+		}
+		for _, tenantID := range []string{"msp-b", "client-b1", "msp-a-evil"} {
+			assert.Equal(t, business.PendingRegistrationStatusPending, f.statusOf(t, tenantID), tenantID)
+		}
+	})
+
+	t.Run("client caller approve-all does not touch its parent's entry", func(t *testing.T) {
+		f := newSubtreeScopeFixture(t)
+		rec := httptest.NewRecorder()
+		f.server.handleApproveAllRegistrations(rec, bulkRequest(http.MethodPost,
+			"/api/v1/registration/approve-all", "", "client-a1"))
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.Equal(t, business.PendingRegistrationStatusPending, f.statusOf(t, "msp-a"))
+		assert.Equal(t, business.PendingRegistrationStatusApproved, f.statusOf(t, "client-a1"))
+	})
+}
