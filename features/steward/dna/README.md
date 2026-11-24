@@ -12,7 +12,16 @@ contract or desired-state comparison schema.
 
 [`Collector`](dna.go) collects basic/environment and fast host facts synchronously,
 caches hardware results and starts background work for slower software/security
-collection. Platform factories choose the concrete hardware, network, software
+collection. The first `Collect` starts the slow collection; it is then re-collected
+on an interval (`DefaultSlowCollectionInterval`, 30 minutes; override with
+`WithSlowCollectionInterval`, a non-positive value keeps the default), so software
+or security state that changes after start-up appears in DNA within one interval.
+Only one slow collection runs at a time. `Collect` and `RawAttributes` never wait
+for it: they merge the last completed result. A re-run whose 5-minute context
+expires or is cancelled keeps the previous result and waits one interval before
+the next attempt. `SlowCollectedAt()` returns the completion time of the last kept
+run (zero before the first completes); it is not written into the attributes or
+fragments, so it does not change fragment hashes. Platform factories choose the concrete hardware, network, software
 and security collectors. The `*_linux.go`, `*_windows.go`, `*_darwin.go` sources
 and their tests own exact field names and failure/platform availability.
 

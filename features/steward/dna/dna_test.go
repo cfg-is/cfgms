@@ -5,6 +5,11 @@ package dna
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -473,4 +478,233 @@ func TestRawAttributesUnchangedByOsquerySource(t *testing.T) {
 	// cpu_brand is an osquery-specific field name not produced by gatherers.
 	assert.NotContains(t, attrsNoOsquery, "cpu_brand",
 		"gatherer RawAttributes must not contain osquery-specific keys like cpu_brand")
+}
+
+// --- Slow-collection refresh tests (Issue #6498) ---
+
+const testPackageAttr = "test_package_list"
+
+// filePackageCollector is a real SoftwareCollector that reads a package list
+// from a local file. Unused methods write nothing and return nil.
+type filePackageCollector struct {
+	path  string
+	calls atomic.Int32
+	// gate, when non-nil, is received from before CollectPackages reads the
+	// file, so a test can hold a run open.
+	gate chan struct{}
+	// started, when non-nil, receives a value each time CollectPackages begins.
+	started chan struct{}
+}
+
+func (f *filePackageCollector) CollectOS(context.Context, map[string]string) error { return nil }
+func (f *filePackageCollector) CollectServices(context.Context, map[string]string) error {
+	return nil
+}
+func (f *filePackageCollector) CollectProcesses(context.Context, map[string]string) error {
+	return nil
+}
+
+func (f *filePackageCollector) CollectPackages(ctx context.Context, attrs map[string]string) error {
+	f.calls.Add(1)
+	if f.started != nil {
+		select {
+		case f.started <- struct{}{}:
+		default:
+		}
+	}
+	if f.gate != nil {
+		select {
+		case <-f.gate:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	data, err := os.ReadFile(f.path)
+	if err != nil {
+		return err
+	}
+	attrs[testPackageAttr] = strings.TrimSpace(string(data))
+	return nil
+}
+
+// newFilePackageCollector builds a Collector whose software source is the
+// package-list file at a fresh t.TempDir() path, holding initial.
+func newFilePackageCollector(t *testing.T, initial string, sw *filePackageCollector, opts ...CollectorOption) (*Collector, string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "packages.txt")
+	require.NoError(t, os.WriteFile(path, []byte(initial), 0o600))
+	sw.path = path
+
+	snap, err := dnasnapshot.Load(dnaSnapshotFixturePath)
+	require.NoError(t, err)
+	base := []CollectorOption{
+		WithHardwareCollector(dnasnapshot.NewHardwareCollector(snap.Hardware)),
+		WithSoftwareCollector(sw),
+		WithNetworkCollector(dnasnapshot.NewNetworkCollector(snap.Network)),
+		WithSecurityCollector(dnasnapshot.NewSecurityCollector(snap.Security)),
+	}
+	return NewCollector(logging.NewLogger("error"), append(base, opts...)...), path
+}
+
+func TestSlowCollectionRefreshesOnInterval(t *testing.T) {
+	const interval = 300 * time.Millisecond
+	sw := &filePackageCollector{}
+	c, path := newFilePackageCollector(t, "pkg-v1", sw, WithSlowCollectionInterval(interval))
+	ctx := t.Context()
+
+	assert.True(t, c.SlowCollectedAt().IsZero(), "no collection has completed yet")
+
+	_, err := c.Collect(ctx)
+	require.NoError(t, err)
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	c.WaitForBackground(waitCtx)
+	require.NoError(t, waitCtx.Err(), "first slow run must complete")
+	assert.Equal(t, "pkg-v1", c.RawAttributes(ctx)[testPackageAttr])
+	first := c.SlowCollectedAt()
+	require.False(t, first.IsZero())
+
+	require.NoError(t, os.WriteFile(path, []byte("pkg-v2"), 0o600))
+	time.Sleep(interval + 100*time.Millisecond)
+
+	_, err = c.Collect(ctx)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		return c.RawAttributes(ctx)[testPackageAttr] == "pkg-v2"
+	}, 30*time.Second, 25*time.Millisecond, "RawAttributes must show the re-collected value")
+	assert.True(t, c.SlowCollectedAt().After(first), "SlowCollectedAt must advance")
+	assert.EqualValues(t, 2, sw.calls.Load())
+}
+
+func TestSlowCollectionDoesNotRerunBeforeInterval(t *testing.T) {
+	sw := &filePackageCollector{}
+	c, path := newFilePackageCollector(t, "pkg-v1", sw) // default 30m interval
+	ctx := t.Context()
+
+	_, err := c.Collect(ctx)
+	require.NoError(t, err)
+	c.WaitForBackground(ctx)
+
+	require.NoError(t, os.WriteFile(path, []byte("pkg-v2"), 0o600))
+	for i := 0; i < 3; i++ {
+		_, err = c.Collect(ctx)
+		require.NoError(t, err)
+	}
+	assert.EqualValues(t, 1, sw.calls.Load(), "no re-run within the default interval")
+	assert.Equal(t, "pkg-v1", c.RawAttributes(ctx)[testPackageAttr])
+}
+
+func TestWithSlowCollectionIntervalNonPositiveKeepsDefault(t *testing.T) {
+	logger := logging.NewLogger("error")
+	assert.Equal(t, DefaultSlowCollectionInterval, NewCollector(logger).slowInterval)
+	assert.Equal(t, DefaultSlowCollectionInterval, NewCollector(logger, WithSlowCollectionInterval(0)).slowInterval)
+	assert.Equal(t, DefaultSlowCollectionInterval, NewCollector(logger, WithSlowCollectionInterval(-time.Second)).slowInterval)
+	assert.Equal(t, time.Second, NewCollector(logger, WithSlowCollectionInterval(time.Second)).slowInterval)
+	assert.Equal(t, 30*time.Minute, DefaultSlowCollectionInterval)
+}
+
+func TestSlowCollectionSingleFlight(t *testing.T) {
+	gate := make(chan struct{})
+	sw := &filePackageCollector{gate: gate}
+	// A tiny interval means only the single-flight guard can prevent overlap.
+	c, _ := newFilePackageCollector(t, "pkg-v1", sw, WithSlowCollectionInterval(time.Nanosecond))
+	ctx := t.Context()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := c.Collect(ctx)
+			assert.NoError(t, err)
+		}()
+	}
+	wg.Wait()
+	time.Sleep(100 * time.Millisecond)
+	_, err := c.Collect(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, sw.calls.Load(), "at most one slow run while one is blocked")
+
+	close(gate)
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	c.WaitForBackground(waitCtx)
+	require.NoError(t, waitCtx.Err())
+}
+
+func TestCollectDoesNotWaitForSlowRun(t *testing.T) {
+	const interval = 100 * time.Millisecond
+	gate := make(chan struct{})
+	started := make(chan struct{}, 1)
+	sw := &filePackageCollector{started: started}
+	c, _ := newFilePackageCollector(t, "pkg-v1", sw, WithSlowCollectionInterval(interval))
+	ctx := t.Context()
+
+	_, err := c.Collect(ctx)
+	require.NoError(t, err)
+	c.WaitForBackground(ctx)
+	require.Equal(t, "pkg-v1", c.RawAttributes(ctx)[testPackageAttr])
+
+	// Block the next run, then let the interval elapse.
+	sw.gate = gate
+	drain(started)
+	time.Sleep(interval + 50*time.Millisecond)
+
+	_, err = c.Collect(ctx) // triggers the re-run, which blocks on gate
+	require.NoError(t, err)
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("re-run did not start")
+	}
+
+	begin := time.Now()
+	d, err := c.Collect(ctx)
+	require.NoError(t, err)
+	assert.Less(t, time.Since(begin), 5*time.Second, "Collect must not wait for the slow run")
+	require.NotNil(t, d)
+	assert.Equal(t, "pkg-v1", c.RawAttributes(ctx)[testPackageAttr], "previous slow attributes are still merged")
+
+	close(gate)
+}
+
+func drain(ch chan struct{}) {
+	for {
+		select {
+		case <-ch:
+		default:
+			return
+		}
+	}
+}
+
+// TestSlowRerunWithExpiredContextKeepsPreviousResult drives runBackgroundCollection
+// directly with a cancelled context: a re-run keeps the previous result and does
+// not advance SlowCollectedAt, while the single-flight flag is released.
+func TestSlowRerunWithExpiredContextKeepsPreviousResult(t *testing.T) {
+	sw := &filePackageCollector{}
+	c, path := newFilePackageCollector(t, "pkg-v1", sw)
+	ctx := t.Context()
+
+	_, err := c.Collect(ctx)
+	require.NoError(t, err)
+	c.WaitForBackground(ctx)
+	before := c.SlowCollectedAt()
+	require.False(t, before.IsZero())
+
+	require.NoError(t, os.WriteFile(path, []byte("pkg-v2"), 0o600))
+	c.slowStateMu.Lock()
+	c.slowRunning = true
+	c.slowStateMu.Unlock()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.runBackgroundCollection(cancelled, false)
+
+	assert.Equal(t, "pkg-v1", c.RawAttributes(ctx)[testPackageAttr], "previous result is kept")
+	assert.Equal(t, before, c.SlowCollectedAt(), "SlowCollectedAt does not advance")
+	c.slowStateMu.Lock()
+	running := c.slowRunning
+	c.slowStateMu.Unlock()
+	assert.False(t, running, "single-flight flag released")
 }
