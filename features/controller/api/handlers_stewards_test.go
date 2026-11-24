@@ -5112,3 +5112,110 @@ func TestHandleGetSteward_KeyProtection_BothPaths(t *testing.T) {
 		assert.Equal(t, "ed25519", info.KeyAlgorithm)
 	})
 }
+
+// versionTestServer wires a test server to a real ControllerService backed by a
+// durable steward store, with the fleet query reading through that service —
+// the same composition the controller runs with.
+func versionTestServer(t *testing.T) (*Server, *service.ControllerService, business.StewardStore) {
+	t.Helper()
+	server := setupTestServer(t)
+	st, _ := newTestStewardDurableStore(t)
+	svc := service.NewControllerService(logging.NewNoopLogger())
+	svc.SetStewardStore(st)
+	server.controllerService = svc
+	server.SetStewardStore(st)
+	server.fleetQuery = fleet.NewMemoryQuery(&controllerServiceAdapter{svc: svc})
+	return server, svc, st
+}
+
+// listStewardsVersions calls handleListStewards and returns id → version.
+func listStewardsVersions(t *testing.T, server *Server, rawQuery string) map[string]string {
+	t.Helper()
+	rec := handlersstewardsCharListAs(server, rawQuery, handlersstewardsCharRoot())
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var list []StewardInfo
+	handlersstewardsCharData(t, rec, &list)
+	out := make(map[string]string, len(list))
+	for _, s := range list {
+		out[s.ID] = s.Version
+	}
+	return out
+}
+
+// TestListStewards_PeerAttachedStewardShowsDurableVersion proves the unfiltered
+// list reports the version `steward status` shows for a steward this node never
+// handled (attached to a peer): the durable record is the only source.
+func TestListStewards_PeerAttachedStewardShowsDurableVersion(t *testing.T) {
+	server, _, st := versionTestServer(t)
+	ctx := context.Background()
+
+	// Neither steward is in the in-memory registry; both exist only durably.
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "s-peer-ver", TenantID: "test-tenant", Status: business.StewardStatusActive,
+		RegisteredAt: time.Now().UTC(), Version: "v1.2.3",
+	}))
+	require.NoError(t, st.RegisterSteward(ctx, &business.StewardRecord{
+		ID: "s-peer-nodna", TenantID: "test-tenant", Status: business.StewardStatusRegistered,
+		RegisteredAt: time.Now().UTC(), Version: "v4.5.6",
+	}))
+
+	versions := listStewardsVersions(t, server, "")
+	require.Contains(t, versions, "s-peer-ver")
+	assert.Equal(t, "v1.2.3", versions["s-peer-ver"], "peer-attached steward must show its durable version")
+	require.Contains(t, versions, "s-peer-nodna")
+	assert.Equal(t, "v4.5.6", versions["s-peer-nodna"], "a record with no DNA yet must still show its version")
+
+	// The detail view reads the same durable record and must agree with the list.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/stewards/s-peer-ver", nil)
+	req = withPrincipal(req, handlersstewardsCharRoot())
+	req = withVars(req, map[string]string{"id": "s-peer-ver"})
+	rec := httptest.NewRecorder()
+	server.handleGetSteward(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var detail StewardInfo
+	handlersstewardsCharData(t, rec, &detail)
+	assert.Equal(t, versions["s-peer-ver"], detail.Version, "list and status must report the same version")
+}
+
+// TestListStewards_FilteredAndSelectorReturnRunningVersion proves the filtered,
+// selector and fleet-resolve paths report the steward's version when DNA arrives
+// through the real fragment path (SyncDNA) — no hand-set steward.version attribute.
+func TestListStewards_FilteredAndSelectorReturnRunningVersion(t *testing.T) {
+	server, svc, _ := versionTestServer(t)
+	ctx := ctxkeys.WithSystem(context.Background())
+
+	require.NoError(t, svc.RegisterSteward("s-run-ver", "test-tenant", "addr", "active"))
+	dna := &common.DNA{
+		Id: "s-run-ver",
+		Fragments: []*common.Fragment{
+			mustAPIFrag(t, "host:os", map[string]interface{}{"os": "linux"}),
+			mustAPIFrag(t, "hostname", map[string]interface{}{"hostname": "run-ver-host"}),
+		},
+	}
+	status, err := svc.SyncDNA(ctx, dna)
+	require.NoError(t, err)
+	require.Equal(t, common.Status_OK, status.Code)
+	require.True(t, svc.RecordHeartbeat("s-run-ver", "v2.0.1", time.Now()))
+
+	// Guard: the DNA fragments themselves carry no version, so a pass below can
+	// only come from the controller joining StewardInfo.Version into the index.
+	info, ok := svc.GetStewardInfo("s-run-ver")
+	require.True(t, ok)
+	assert.NotContains(t, service.FlattenDNAFragments(info.DNA.GetFragments()), "steward.version")
+
+	assert.Equal(t, "v2.0.1", listStewardsVersions(t, server, "os=linux")["s-run-ver"],
+		"filtered list (?os=) must report the running version")
+	assert.Equal(t, "v2.0.1", listStewardsVersions(t, server, "q=os:linux")["s-run-ver"],
+		"selector list (?q=) must report the running version")
+
+	results, err := server.fleetQuery.Search(ctx, fleet.Filter{OS: "linux"})
+	require.NoError(t, err)
+	var found bool
+	for _, res := range results {
+		if res.ID == "s-run-ver" {
+			found = true
+			assert.Equal(t, "v2.0.1", res.RunningVersion, "fleet resolve RunningVersion must equal the steward version")
+		}
+	}
+	require.True(t, found, "steward must appear in the fleet search results")
+}

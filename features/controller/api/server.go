@@ -864,15 +864,11 @@ func (a *controllerServiceAdapter) GetAllStewards() []fleet.StewardData {
 // controllerServiceAdapter passes info.Tags (already populated by ListFleetStewards).
 // (Issue #3495, #3764)
 func buildStewardFleetData(info *service.StewardInfo, ctrlTags []string) fleet.StewardData {
-	var attrs map[string]string
 	var frags []*commonpb.Fragment
 	if info.DNA != nil {
-		attrs = service.FlattenDNAFragments(info.DNA.Fragments)
 		frags = info.DNA.Fragments
 	}
-	if len(ctrlTags) > 0 {
-		attrs = service.MergeControllerTags(attrs, ctrlTags)
-	}
+	attrs := service.FleetDNAAttributes(info, ctrlTags)
 	return fleet.StewardData{
 		ID:            info.ID,
 		TenantID:      info.TenantID,
