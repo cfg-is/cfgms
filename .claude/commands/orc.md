@@ -424,8 +424,14 @@ delete a lease that another host took.
 ./.claude/tooling/scripts/po-act.sh state '[.owner_start_recommendations[]?]'
 ```
 
-One entry for each open epic that has no sub-issues and no active owner:
-`{number, title, item_id, action, reason}`.
+One entry for each open issue that an owner can build and that has no active
+owner: `{number, title, item_id, action, reason, kind}`. `kind` is `epic` (an
+issue with the `epic` label and no sub-issues) or `issue` (any other open
+issue at `Ready` that has the `internal` label, no parent issue and no
+sub-issues, that no PR or story run works on, and that needs no other
+environment than this host gives). A bug fix issue at `Ready` is such an
+issue. An issue under an old epic, and an issue that needs another
+environment, stay in the story flow.
 
 - `action: start` → run
   `./.claude/tooling/scripts/po-act.sh dispatch --epic <number> --item-id <item_id>`
@@ -452,6 +458,10 @@ One entry for each open epic that has no sub-issues and no active owner:
     and the host's resources decide.
   - `owner_limit_invalid` — `CFGMS_OWNER_MAX_RUNS` is not a whole number.
     No owner starts until a person corrects it. `Needs a person`.
+  - `not_internal` — the issue has no `internal` label. An owner never
+    starts on an issue that an outside party could have written.
+  - `parent_unknown` — the preflight could not read if the issue belongs to
+    an epic. The next cycle tries again.
   - `develop_broken`, `degraded` — the gates of step 1.
 
 **`Ready` is the start signal.** An epic gets an owner by itself only when
@@ -469,11 +479,12 @@ stays `Ready`, and the next cycle tries again.
 | `FSM_RUN:<run>` then `FSM_LAUNCH_PENDING:epic-<N>:<status>` then `DISPATCHED_EPIC:<N>` | 0 | The run prepares and has not started the owner in the wait time. It holds the lease and goes on by itself. |
 | `DISPATCH_DEFERRED:epic-<N>:resources (…)` | 0 | The host has too few free places. An owner needs one for itself, one for the test run of its slices, and the review reserve stays free (`CFGMS_AGENT_REVIEW_RESERVE`, default 1). The next cycle tries again. |
 | `DISPATCH_DEFERRED:epic-<N>:claude_token_timeout` | 0 | The token read timed out. The next cycle tries again. |
-| `DISPATCH_DEFERRED:epic-<N>:<other>` (`lease_held`, `github_timeout`, `base_branch_fetch_failed`, `board_write_failed`, `capacity:<binding>`) | 0 | The next cycle tries again. |
+| `DISPATCH_DEFERRED:epic-<N>:<other>` (`lease_held`, `github_timeout`, `base_branch_fetch_failed`, `story_work_in_flight`, `label_write_failed`, `board_write_failed`, `capacity:<binding>`) | 0 | The next cycle tries again. |
 | `DISPATCH_DEFERRED:epic-<N>:creds` | 10 | No agent token. `Needs a person`: `/agent-setup creds`. |
 | `IMAGE_STALE:…` + `DISPATCH_REFUSED:epic-<N>:image_stale (…)` | 3 | The agent image is older than the tools. `Needs a person`: `/agent-setup rebuild`. `dispatch` never rebuilds. |
 | `DISPATCH_REFUSED:epic-<N>:claude_token_<reason>` | 3 | The long-life Claude token file cannot be read. `Needs a person`, with the line. |
 | `DISPATCH_REFUSED:epic-<N>:no_epic_item` | 3 | The epic has no project item. |
+| `DISPATCH_REFUSED:epic-<N>:not_internal` | 3 | The issue has neither the `epic` nor the `internal` label. `Needs a person`, with the line. |
 | `DISPATCH_REFUSED:epic-<N>:no_canon_or_memory_dir (…)` | 3 | The host clones of canon or of the shared notes are not found. `Needs a person`. |
 | `DISPATCH_NOTE:epic-<N>:memory_git_quarantined (…)` | — | Extra line. The helper moved a `.git` entry out of the notes folder and went on. Copy it under `Needs a person`. |
 | `DISPATCH_REFUSED:epic-<N>:memory_dir_has_git (…)` | 3 | `Needs a person`: the one-time notes setup of step 8 is missing. |
