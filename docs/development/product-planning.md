@@ -8,9 +8,14 @@ still apply.
 
 The [vision](../product/vision.md) owns product intent; the active priorities in
 the [roadmap](../product/roadmap.md) own release scope. Operating models describe
-runtime behavior, accepted ADRs own technical decisions, and Reference mockups
-own visual direction. Superseded guidance must not remain a competing source
-of instructions in the current tree.
+runtime behavior and accepted ADRs own technical decisions. Superseded guidance
+must not remain a competing source of instructions in the current tree.
+
+Web changes are gated by their tests and the repository's measured gates. A
+mockup is a specification only when the founder supplies one for that work;
+existing mockups are not required to track later screen changes. The design
+tokens and the [web UI design system](../design/web-ui-design-system.md) remain
+binding for web work.
 
 Distinguish approved requirements, accepted decisions, observed implementation
 and proposals. If new intent conflicts with an accepted security decision, record
@@ -41,7 +46,7 @@ headings. Capture the following within them without changing parser contracts:
 - Beta, launch or later classification and why it belongs there.
 - Current behavior, source/issue evidence and intended change.
 - Success scenario and material failure, partial-result or offline scenarios.
-- Platform/integration coverage, dependencies, explicit exclusions and design source.
+- Platform/integration coverage, dependencies, explicit exclusions.
 - Tenant scope, permissions, observation versus mutation, approvals and side effects.
 - Verification method, documentation changes and unresolved decisions.
 
@@ -60,7 +65,7 @@ story set does not establish a completed operator journey.
 
 BA proposes the coverage map; Tech Lead verifies feasibility and evidence; PO
 owns product scope and unresolved decisions. Preserve the existing dependency,
-design-source, files/docs-in-scope and required-test conventions. Epic-specific
+files/docs-in-scope and required-test conventions. Epic-specific
 product rules belong in the epic, linked to the canonical vision and decisions,
 rather than copied as competing global instructions.
 

@@ -53,7 +53,7 @@ do not require every story to deliver the whole epic.
 > confidence. If a story describes a defect that a merge has already fixed, that is a
 > finding: say so rather than promoting it.
 
-For each story, run all 10 checks. A story must pass ALL checks to be promoted.
+For each story, run all 9 checks. A story must pass ALL checks to be promoted.
 
 ### 1. Dependency Ordering & File Conflict Detection
 
@@ -301,44 +301,6 @@ ordinary sequencing that the dispatcher gates automatically (Check 1) and is **n
 a pre-merge-evidence failure. This check is about evidence that cannot exist until
 *this* story's own change lands.
 
-### 10. Design Controls (visual stories)
-
-A **visual story** is any story whose `## Files In Scope` touches the web UI
-(`web/src/**`, `.tsx`, component styles) or that adds/changes a user-visible
-screen, view, component, or visual state. CLI output formatting is **not** a
-visual story — the design-token system governs the web UI only.
-
-A visual story must NOT reach Ready without a **design source**. Verify the
-story body carries a `## Design Source` section naming exactly one of:
-
-- **(a) A reference mockup** — a screen in `docs/design/mockups/` whose status
-  is **Reference** (never **Superseded**) that covers this surface, cited by
-  filename. The story's acceptance criteria must require the built screen to
-  match it.
-- **(b) An explicit reuse statement** — "reuses the shipped app-shell chrome
-  (#2496) / router (#2747) and existing components; no new visual design,"
-  naming the concrete shipped screen or component pattern it follows. Use this
-  only when the surface genuinely introduces **no new visual design** (e.g.
-  another tab inside an existing layout, a table that mirrors fleet-overview).
-
-In **both** cases the story must cite `docs/design/web-ui-design-tokens.css` as
-the source of truth — no free-hand colour, spacing, or type; semantic state
-tokens (converged / drift / error / queued) — and must not reintroduce a
-superseded mockup. See `docs/design/web-ui-design-system.md` for the identity
-and principles the tokens encode.
-
-**Routing:**
-- Section present and satisfied → this check passes.
-- Section missing but the surface plainly reuses existing chrome with no new
-  visual (a judgment you can make from the shipped screens) → add the
-  `## Design Source` reuse statement yourself and pass, exactly as you add
-  implementation notes.
-- A **genuinely new visual surface with no Reference mockup** → **Blocked**, not
-  Revision. Only the founder authors and approves a mockup (founder-owned
-  design). Post the Blocked comment naming the screen that needs a mockup so it
-  surfaces as founder-owned work on the PO ladder. Do not invent a "no new
-  visual" statement to force such a story to Ready.
-
 ## Editing a gate-bearing section
 
 `## Dependencies` and `## Files In Scope` are **machine-read**. The dispatch preflight
@@ -415,7 +377,7 @@ and overusing it buries real escalations in noise.
 
 | Outcome | Project status | Use when | Who acts next |
 |---|---|---|---|
-| **Ready** | `Ready` | Passes all 10 checks. A well-formed dependency that is merely *open* still passes (Check 1). | Dispatcher (auto, when deps merge) |
+| **Ready** | `Ready` | Passes all 9 checks. A well-formed dependency that is merely *open* still passes (Check 1). | Dispatcher (auto, when deps merge) |
 | **Revision Needed** | `Draft` | A check fails in a way an agent (BA / Planning Team) can fix: missing/malformed sections, vague ACs, oversized / needs-split, wrong refs or paths you could not auto-fix. | BA / Planning Team |
 | **Blocked** | `Blocked` | Only a human can resolve it (see list below). | Founder / PO |
 
@@ -423,7 +385,7 @@ and overusing it buries real escalations in noise.
 
 ### Outcome 1 — Ready (passes)
 
-When all 10 checks pass:
+When all 9 checks pass:
 
 1. Update the issue body with any additions (implementation notes, dependency fixes). Read the
    live body immediately before writing, not the one this pass started with — the checklist above
@@ -536,7 +498,6 @@ Reserved for issues **only a human can resolve**. Set status Blocked only when o
 - A constraint or architecture decision: needs a new central provider, crosses the licensing boundary, or requires a `CLAUDE.md` / root Makefile / CI change the epic did not authorize
 - A non-v1 / not-yet-scheduled item with no actionable acceptance criteria (decompose-or-icebox is the founder's call)
 - A circular dependency that a human must break
-- A genuinely new visual surface with no **Reference** mockup in `docs/design/mockups/` — only the founder authors and approves UI mockups (founder-owned design; Check 10)
 
 **Never set Blocked for:** an open (unmerged) dependency — the dispatcher gates
 it (Check 1); a fixable spec gap or an oversized story — those are *Revision
@@ -602,7 +563,7 @@ rm /tmp/tl-summary.md
 
 - Never modify source code — you only read code and write GitHub issues
 - Never promote a story you haven't validated against the actual codebase
-- Never set status to Ready if ANY of the 10 checks fail
+- Never set status to Ready if ANY of the 9 checks fail
 - If you can fix an issue by editing the story body (adding notes, fixing a path), do that rather than blocking
 - Batch multiple stories efficiently — read shared files once, not per-story
 - The story quality bar (self-contained, explicit files, testable criteria, single concern, no vague verbs) is the BA's job. Your job is executability validation on top of that.
@@ -616,7 +577,7 @@ When spawned as a teammate (with a `name`, as a background agent), you operate a
 - **No GitHub writes.** Never call `pipeline-helper.sh` in team mode. The PO handles all GitHub operations after the team reaches consensus.
 - **Input comes from the team.** The BA sends its story proposals to you directly (usually as a file path — `Read` it); the PO sends the epic context. You do NOT read stories from GitHub issues.
 - **Send verdicts directly to the BA (copy the PO).** For each story send a clear verdict to `ba`, and copy `po`:
-  - **APPROVED** — story passes all 10 checks. Include any implementation notes to add.
+  - **APPROVED** — story passes all 9 checks. Include any implementation notes to add.
   - **REVISION NEEDED** — story fails one or more checks. State the specific check, why, and the concrete fix (with file:line evidence). The BA revises and replies to you directly.
   - **Large verdict sets go to a file** (`/tmp/tl-<epic>-verdicts.md`); the `SendMessage` carries the path + a one-line count (APPROVED vs REVISION NEEDED). Long message bodies get truncated to summaries in transit.
 - **Iterate directly with the BA.** Challenge scope, feasibility, boundaries, and grounding directly with `ba`; the BA defends or revises directly with you. Loop until convergence.

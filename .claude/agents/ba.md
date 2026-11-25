@@ -86,12 +86,11 @@ Every story MUST satisfy ALL of these criteria:
 - **Reuse before writing.** For each new function, type or handler the story asks for, grep for existing code that already does the same job (similar names, signatures, decoders, SQL, handler shapes). Name what the agent must extend or call in `## Implementation Notes`. When the change would leave a second copy of an existing block in the files the story already touches, removing that duplicate is in scope of the same story (it is the same concern) and carries an AC. A duplicate that reaches into packages the story does not otherwise touch goes in `## Out of Scope` with the follow-up named. A deliberate copy is allowed only with its justification written in the story and in a comment at the copy that names the original.
 - **Required tests are marked.** Tests that MUST be present to consider the story done are prefixed `[REQUIRED TEST]` in the AC list — agents have been observed treating unmarked test ACs as optional.
 - **Out of scope is explicit.** Every story has a `## Out of Scope` section calling out adjacent code the agent must NOT touch (e.g., `examples/` directory, README updates, refactors of nearby code). Agents that go out of scope cause acceptance-review kickbacks.
-- **Visual stories carry a design source.** Any story that touches the web UI (`web/src/**`, `.tsx`, component styles) or adds/changes a user-visible screen, view, component, or visual state MUST include a `## Design Source` section (load the shared story template below). A visual story with no design source cannot be promoted to Ready — the Tech Lead will Block it as founder-owned design work. Author the design source at decomposition; do not defer it.
 
 ## Story Body Format
 
 Before drafting any story, **read `docs/development/story-template.md`**. It owns
-the body headings, dependency syntax, scope fields, visual design source and
+the body headings, dependency syntax, scope fields and
 execution-environment rules. Use the loaded template for each self-contained
 story body; merely citing its path is not enough. Keep this role's quality,
 migration, docs/tests and seam checks below.
