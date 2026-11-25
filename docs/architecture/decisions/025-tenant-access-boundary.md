@@ -790,6 +790,7 @@ certificate; what changes is that classification alone no longer grants anything
 - Every existing admin certificate stops working until bound to an account. Pre-GA, this is a clean
   break rather than a migration; the project convention is to prefer the break and a clear error
   message over a compatibility shim.
+  Note (2026-11-25): the pre-release clean-break rule (no migration path for a breaking change) was the rule in force when this decision was made. It was retired on 2026-11-17. The current rule is [`develop` stays deployable](../../product/vision.md#principles).
 - Revocation remains authoritative but is no longer the only control. Deleting or disabling the
   bound account is now sufficient to render a certificate inert, without needing to reach the CA.
 - The follow-up question recorded on epic #3178 — whether a root-scope account should be *required*

@@ -166,6 +166,8 @@ deprecated alias. CFGMS is pre-production and the house rule is a hard break ove
 shim: every call site is forced through review exactly once, rather than the unsafe primitive
 remaining reachable by a name that reads correct.
 
+> Note (2026-11-25): the pre-release clean-break rule (no migration path for a breaking change) was the rule in force when this decision was made. It was retired on 2026-11-17. The current rule is [`develop` stays deployable](../../product/vision.md#principles).
+
 **Placement.** `RaftConsensus` (`pkg/ha/raft_consensus.go`) is a concrete struct with no
 interface wrapper. The only defined interface is `ClusterManager`
 (`pkg/ha/interfaces.go:103-136`, implemented by `Manager`), whose `IsLeader() bool` is declared

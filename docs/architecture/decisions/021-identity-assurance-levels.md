@@ -395,6 +395,7 @@ maximizes the lifetime of the most valuable credential and defeats the purpose.
   `requireTier`, and `tier3Permissions` all change or disappear. Per the pre-GA
   policy this is a hard replacement — no shim, no dual-gate transition, no
   deprecation window.
+  Note (2026-11-25): the pre-release clean-break rule (no migration path for a breaking change) was the rule in force when this decision was made. It was retired on 2026-11-17. The current rule is [`develop` stays deployable](../../product/vision.md#principles).
 - **Sessions gain device-continuity state that does not exist today.**
   `pkg/session.Session` (`contract.go:31-39`) records only ID, ConnectionName,
   PrincipalID, TenantID, IssuedAt, LastActivity, AbsoluteExpiresAt — **no device

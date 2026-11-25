@@ -65,6 +65,8 @@ compromised admin session's account changes are fully audited. Public-key-only
 storage means a stolen secret store yields no crackable credential material —
 there is no password hash to attack offline.
 
+> Note (2026-11-25): the pre-release clean-break rule (no migration path for a breaking change) was the rule in force when the password credential was retired. It was retired on 2026-11-17. The current rule is [`develop` stays deployable](../product/vision.md#principles).
+
 ### Web Session Transport (Issue #2492, ADR-018 §1,2)
 
 The controller authenticates browser clients via a `__Host-cfgms_session` HttpOnly cookie,
