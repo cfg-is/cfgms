@@ -41,18 +41,12 @@ references always use real numbers; placeholder tokens are retired):>
 
 <Use "None — no product-shape change" with justification only if the story genuinely doesn't change observable shape. See ba.md "Documentation & Tests Currency" rule.>
 
-## Design Source
+## Mockup
 
-<Required only for visual stories: web/src changes, TSX/styles or a new/changed
-screen, view, component or visual state. Omit for non-visual work; CLI output is
-not visual. Name ONE current Reference mockup under docs/design/mockups/ or an
-explicit reuse statement naming an existing shipped surface/component. Require
-matching the reference in acceptance criteria, including relevant themes and
-Ready/Loading/Error/Empty states. Cite docs/design/web-ui-design-tokens.css and
-follow docs/design/web-ui-design-system.md. Never use a Superseded mockup or
-free-hand tokens. If a new surface lacks a Reference mockup, write
-"Design source: PENDING founder mockup" and flag the PO; the story cannot reach
-Ready until the founder-owned design gate is satisfied.>
+<Optional. Include only when the founder supplied a mockup for this work: name
+the file under docs/design/mockups/ and require the built screen to match it.
+Omit otherwise. Web work follows docs/design/web-ui-design-tokens.css and
+docs/design/web-ui-design-system.md.>
 
 ## Environment
 
