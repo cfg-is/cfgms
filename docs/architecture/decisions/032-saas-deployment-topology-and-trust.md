@@ -157,6 +157,7 @@ the permanent shape.
   contract; endpoint-visible changes ride the normal enrollment flow, and
   existing pre-beta lab endpoints are wiped and re-enrolled once the root exists
   (pre-production, per the no-migration-tooling rule).
+  Note (2026-11-25): the pre-release clean-break rule (no migration path for a breaking change) was the rule in force when this decision was made. It was retired on 2026-11-17. The current rule is [`develop` stays deployable](../../product/vision.md#principles).
 - The installer remains a single global artifact for beta; per-cell binding
   arrives with the second cell (registration tokens are already tenant-scoped
   and can become cell-scoped then).

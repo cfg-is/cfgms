@@ -34,6 +34,8 @@ ADR-016 requires every module's `Get` to emit a **canonical DNA fragment** per m
 
 CFGMS has no production deployments. The `commonpb.DNA` wire type is redefined cleanly (flat map → fragment set); no migration shims or dual-format support are built (per the project's pre-release breaking-change policy).
 
+> Note (2026-11-25): the pre-release clean-break rule (no migration path for a breaking change) was the rule in force when this decision was made. It was retired on 2026-11-17. The current rule is [`develop` stays deployable](../../product/vision.md#principles).
+
 ---
 
 ## Decision
@@ -143,6 +145,7 @@ The specific osquery queries that populate `host:*` fragments are **not** enumer
 ### Negative
 
 1. **Breaking proto redesign**: `commonpb.DNA` changes from flat map to fragment set — acceptable pre-production, done as a clean break with no shims. Everything reading/writing DNA (heartbeat, controller store, delta transfer) changes with it.
+   Note (2026-11-25): the pre-release clean-break rule (no migration path for a breaking change) was the rule in force when this decision was made. It was retired on 2026-11-17. The current rule is [`develop` stays deployable](../../product/vision.md#principles).
 2. **Collector decomposition**: the monolithic `Collector`'s gatherers must be reclassified — managed categories migrate into module `Get` (`user`, `hostname`, etc. per ADR-016), unmanaged host facts migrate to the osquery allowlist. Real refactoring, not a rename.
 3. **New steward + controller machinery**: the assembler, the authority resolver, fragment-addressable controller-side DNA storage, and the delta protocol are new.
 4. **Depends on osquery + stdlib**: the `host:*` fragment layer needs the osquery integration (#2), and authority resolution needs the module ownership declarations (#3 / ADR-016). This epic sits downstream of both.

@@ -99,6 +99,8 @@ external consumers depend on. A hard breaking change (remove `*slog.Logger`, add
 `logging.Logger`) is the correct approach. Migration shims add permanent dead weight and
 mask the underlying violation.
 
+> Note (2026-11-25): the pre-release clean-break rule (no migration path for a breaking change) was the rule in force when this decision was made. It was retired on 2026-11-17. The current rule is [`develop` stays deployable](../../product/vision.md#principles).
+
 ### Scope
 
 This ADR covers only:
@@ -142,6 +144,7 @@ this exception.
 1. **Breaking change**: Any caller that constructs a transport provider and passes a
    `*slog.Logger` in `Configure()` must be updated. Because the codebase is
    pre-production this is acceptable.
+   Note (2026-11-25): the pre-release clean-break rule (no migration path for a breaking change) was the rule in force when this decision was made. It was retired on 2026-11-17. The current rule is [`develop` stays deployable](../../product/vision.md#principles).
 2. **Minor boilerplate**: Providers must add a type-assertion and a nil-guard for the
    injected logger in `Configure()`.
 
