@@ -36,6 +36,7 @@
       "SlashCommand(/orc:*)",
       "Skill(orc)",
       "Skill(orc:*)",
+      "Workflow(epic-completion-audit)",
       "Bash(./.claude/tooling/scripts/po-cycle-preflight.py)",
       "Bash(./.claude/tooling/scripts/po-cycle-preflight.py *)",
       "Bash(./.claude/tooling/scripts/agent-dispatch.sh list-running)",
