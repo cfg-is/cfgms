@@ -11,6 +11,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -334,4 +335,42 @@ func authdefenseKeyFor(t *testing.T, srv *Server, remoteAddr string) string {
 	key := srv.clientIPKey(req)
 	require.NotEmpty(t, key)
 	return key
+}
+
+// runLoginSequence begins one passkey login per character of sequence from one client
+// on srv, finishing it successfully with the spec vector for 'S' and leaving it
+// abandoned for 'A', and returns every begin's store result. A begin refused at the cap
+// is not finished. Shared by the single-node and ClusterMode parity legs.
+func runLoginSequence(t *testing.T, srv *Server, username, sequence string) []passkeyLoginStoreResult {
+	t.Helper()
+	client := srv.clientIPKey(httptest.NewRequest(http.MethodPost, "/", nil))
+	var results []passkeyLoginStoreResult
+	for i, op := range sequence {
+		id := "seq-" + strconv.Itoa(i)
+		res := srv.storePasskeyLoginSession(context.Background(), id, &passkeyLoginSession{
+			data: specLoginSession(t), expires: time.Now().Add(time.Minute), discoverable: true, clientKey: client})
+		results = append(results, res)
+		if res != passkeyLoginStored || op != 'S' {
+			continue
+		}
+		rec := passkeyFinish(srv, id, specLoginBody(t, srv, username))
+		require.Equal(t, http.StatusOK, rec.Code, "finish %d body: %s", i, rec.Body.String())
+	}
+	return results
+}
+
+// The single-node leg of the begin/success/abandon parity check against ClusterMode
+// (TestWebAuthnCluster_SingleNodeAndClusterAgreeOnBeginsAndSuccesses): successes never
+// use up the per-client cap, abandoned begins do.
+func TestPasskeyLoginBegin_SuccessesDoNotCountAgainstPerClientCap(t *testing.T) {
+	srv, username := setupPasskeySessionServer(t)
+	srv.passkeyLoginSessionClientCap = 3
+
+	got := runLoginSequence(t, srv, username, "SSSSSSSSSS")
+	for i, res := range got {
+		assert.Equal(t, passkeyLoginStored, res, "successful login %d", i)
+	}
+	got = runLoginSequence(t, srv, username, "AAAA")
+	assert.Equal(t, []passkeyLoginStoreResult{passkeyLoginStored, passkeyLoginStored, passkeyLoginStored,
+		passkeyLoginStoreClientCapped}, got, "only abandoned begins count")
 }

@@ -211,6 +211,7 @@ type Server struct {
 	passkeyLoginSessionCap          int                                      // Issue #4572: pending passkey login cap; 0 means maxPendingPasskeyLoginSessions (tests shrink it)
 	passkeyLoginPendingByClient     sync.Map                                 // Issue #4572: per-client pending passkey login count; key=clientIPKey, value=*atomic.Int64
 	passkeyLoginSessionClientCap    int                                      // Issue #4572: per-client pending cap; 0 means maxPendingPasskeyLoginSessionsPerClient (tests shrink it)
+	passkeyLoginBeginWindowOverride time.Duration                            // Issue #6519: ClusterMode begin-count window; 0 means passkeyLoginBeginWindow (tests shrink it)
 	stopWebAuthnCeremonySweep       chan struct{}                            // Issue #4572: signals the WebAuthn ceremony expiry sweep to exit
 	webAuthnCeremonySweepDone       chan struct{}                            // Issue #4572: closed when the WebAuthn ceremony sweep goroutine exits
 	telemetryHandler                http.Handler                             // Issue #2765: telemetry fan-out WebSocket handler

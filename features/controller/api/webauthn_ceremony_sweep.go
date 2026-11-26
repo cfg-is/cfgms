@@ -30,11 +30,16 @@ const (
 	// controller node while bounding the map to a few megabytes.
 	maxPendingPasskeyLoginSessions = 10000
 
-	// maxPendingPasskeyLoginSessionsPerClient caps pending passkey login ceremonies per
-	// client (s.clientIPKey: trusted-proxy aware, IPv6 bucketed by /64). Checked before
-	// the global cap, so one client cannot hold more than this many global slots and
-	// cannot by itself fill maxPendingPasskeyLoginSessions to lock real users out. 20
-	// leaves room for a shared NAT with several people signing in at once.
+	// maxPendingPasskeyLoginSessionsPerClient caps passkey login ceremonies per client
+	// (s.clientIPKey: trusted-proxy aware, IPv6 bucketed by /64) that have not ended in a
+	// successful login. On a single node that is the pending ceremonies: a finish
+	// releases its slot. In ClusterMode it is the begins in the begin window minus those
+	// whose login succeeded in that window (Issue #6519); a begin that is abandoned or
+	// whose finish fails keeps counting until the window ends. Either way a completed
+	// login never uses up the budget. Checked before the global cap, so one client
+	// cannot hold more than this many global slots and cannot by itself fill
+	// maxPendingPasskeyLoginSessions to lock real users out. 20 leaves room for a shared
+	// NAT with several people signing in at once.
 	maxPendingPasskeyLoginSessionsPerClient = 20
 
 	// webAuthnThrottleRecordRetention is how long a failure-throttle record is retained
@@ -82,11 +87,15 @@ const (
 // In ClusterMode (Issue #4527) the session goes to the shared NonceStore and the caps
 // are counted on the shared RateCounterStore as begins per passkeyLoginBeginWindow
 // rather than concurrently pending sessions: a finish on another node cannot release a
-// node-local gauge. This is a deliberate semantic change, with unchanged limits. The
-// store failing, or being unwired, refuses the begin (passkeyLoginStoreUnavailable).
+// node-local gauge. The per-client count is begins in the window minus the successful
+// logins of that window (Issue #6519, creditPasskeyLoginSuccess), so a login that
+// succeeds never uses up the client's budget; abandoned begins and begins whose finish
+// failed keep counting for the rest of their window, which is stricter than single node,
+// where any finish releases the slot. The global count is begins and is never credited.
+// The store failing, or being unwired, refuses the begin (passkeyLoginStoreUnavailable).
 func (s *Server) storePasskeyLoginSession(ctx context.Context, ceremonyID string, sess *passkeyLoginSession) passkeyLoginStoreResult {
 	if s.webAuthnClusterMode() {
-		res, err := s.reservePasskeyLoginBegin(sess.clientKey)
+		res, windowID, err := s.reservePasskeyLoginBegin(sess.clientKey)
 		if err != nil {
 			s.logger.Error("Passkey login begin cap unavailable",
 				"error", logging.SanitizeLogValue(err.Error()))
@@ -95,8 +104,10 @@ func (s *Server) storePasskeyLoginSession(ctx context.Context, ceremonyID string
 		if res != passkeyLoginStored {
 			return res
 		}
+		sess.beginWindowID = windowID
 		if s.putClusterCeremony(ctx, ceremonyPrefixLogin, ceremonyID, sess.toWire(),
 			passkeyLoginCeremonyMaxAge*time.Second) != ceremonyOK {
+			s.creditPasskeyLoginBegin(sess.clientKey, windowID) // nothing stored, so no slot held
 			return passkeyLoginStoreUnavailable
 		}
 		return passkeyLoginStored
