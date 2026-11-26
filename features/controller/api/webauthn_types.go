@@ -249,6 +249,11 @@ type passkeyLoginSession struct {
 	// session stored without a reservation.
 	clientKey  string
 	clientSlot *atomic.Int64
+
+	// beginWindowID identifies the cluster begin-count window this ceremony's begin
+	// was counted in (see reservePasskeyLoginBegin). Zero when no begin was counted
+	// against a client key, in which case a successful login credits nothing.
+	beginWindowID int64
 }
 
 // PasskeyLoginBeginRequest is the optional POST /api/v1/web/passkey/login/begin body.

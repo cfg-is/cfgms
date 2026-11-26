@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -82,6 +83,8 @@ type passkeyLoginWire struct {
 	AccountID    string               `json:"account_id"`
 	Discoverable bool                 `json:"discoverable"`
 	ClientKey    string               `json:"client_key"`
+	// BeginWindowID names the begin-count window the begin was counted in (Issue #6519).
+	BeginWindowID int64 `json:"begin_window_id,omitempty"`
 }
 
 type presenceTokenWire struct {
@@ -119,12 +122,12 @@ func (w webAuthnPendingWire) toSession() *webAuthnPendingSession {
 
 func (p *passkeyLoginSession) toWire() passkeyLoginWire {
 	return passkeyLoginWire{Data: p.data, Expires: p.expires, AccountID: p.accountID,
-		Discoverable: p.discoverable, ClientKey: p.clientKey}
+		Discoverable: p.discoverable, ClientKey: p.clientKey, BeginWindowID: p.beginWindowID}
 }
 
 func (w passkeyLoginWire) toSession() *passkeyLoginSession {
 	return &passkeyLoginSession{data: w.Data, expires: w.Expires, accountID: w.AccountID,
-		discoverable: w.Discoverable, clientKey: w.ClientKey}
+		discoverable: w.Discoverable, clientKey: w.ClientKey, beginWindowID: w.BeginWindowID}
 }
 
 func (p *presenceTokenRecord) toWire() presenceTokenWire {
@@ -421,34 +424,119 @@ func (s *Server) recordThrottleFailure(m *sync.Map, prefix, key string) {
 // webAuthnThrottleDenyFails is a failure count in elevateBackoff's longest tier.
 const webAuthnThrottleDenyFails = 12
 
+// passkeyLoginBeginWindowDuration returns the effective begin-count window. A zero
+// s.passkeyLoginBeginWindowOverride (the default) means passkeyLoginBeginWindow; tests
+// shrink it so a begin window can elapse without waiting five minutes.
+func (s *Server) passkeyLoginBeginWindowDuration() time.Duration {
+	if s.passkeyLoginBeginWindowOverride > 0 {
+		return s.passkeyLoginBeginWindowOverride
+	}
+	return passkeyLoginBeginWindow
+}
+
+// passkeyLoginWindowID derives an identifier for the fixed window whose remaining time
+// is retryAfter: the window end, rounded to a granularity (one second, or a twentieth
+// of a shrunken test window). Every begin in one window yields the same ID, up to
+// call-latency jitter at a rounding boundary, which at worst splits one window across
+// two IDs and so loses a credit; it never merges two windows, because consecutive
+// windows of a key end at least one whole window apart, far more than the granularity.
+func passkeyLoginWindowID(retryAfter, window time.Duration) int64 {
+	granularity := min(time.Second, window/20)
+	if granularity <= 0 {
+		granularity = time.Nanosecond
+	}
+	return time.Now().Add(retryAfter).Round(granularity).UnixNano()
+}
+
+// passkeyLoginCreditKey is the RateCounterStore key counting successful logins whose
+// begin was counted for clientKey in the begin window named windowID.
+func passkeyLoginCreditKey(clientKey string, windowID int64) string {
+	return passkeyLoginBeginKeyPrefix + "client-ok:" + clientKey + ":" + strconv.FormatInt(windowID, 10)
+}
+
 // reservePasskeyLoginBegin counts one begin for clientKey, and one globally, in the
-// shared RateCounterStore over passkeyLoginBeginWindow. Issue #4527: in ClusterMode the
-// node-local "currently pending" gauge cannot be released by a finish on another node,
-// so the cap becomes "begun in the window" — a deliberate semantic change; the limits
-// are unchanged. Returns the capped result, or passkeyLoginStored when within limits.
-// A store error (including capacity exhaustion) refuses the begin.
-func (s *Server) reservePasskeyLoginBegin(clientKey string) (passkeyLoginStoreResult, error) {
+// shared RateCounterStore over the begin window (passkeyLoginBeginWindow). Issue #4527:
+// in ClusterMode the node-local "currently pending" gauge cannot be released by a
+// finish on another node, so the cap counts begins in the window instead.
+//
+// Issue #6519: a begin that ends in a successful login is given back, so the per-client
+// cap counts only begins that did not end in a successful login (abandoned begins and
+// begins whose finish failed). RateCounterStore has no decrement, so successes are
+// counted on a second key (creditPasskeyLoginSuccess) named by the begin window's
+// identity, and the cap compares begins minus successes of the same window. Returns the
+// capped result, or passkeyLoginStored when within limits, and the identity of the
+// client's begin window (zero when clientKey is empty, which counts no per-client begin)
+// for the caller to carry in the stored ceremony. The global counter is not credited.
+// A begin refused here, or by the global cap, gives its per-client count back at once, as
+// a single node releases its slot. A store error (including capacity exhaustion) refuses
+// the begin.
+func (s *Server) reservePasskeyLoginBegin(clientKey string) (passkeyLoginStoreResult, int64, error) {
 	if s.rateCounterStore == nil {
-		return passkeyLoginStored, errCeremonyCounterUnavailable
+		return passkeyLoginStored, 0, errCeremonyCounterUnavailable
 	}
 	ctx := context.Background()
+	window := s.passkeyLoginBeginWindowDuration()
+	var windowID int64
 	if clientKey != "" {
-		n, _, err := s.rateCounterStore.Increment(ctx, passkeyLoginBeginKeyPrefix+"client:"+clientKey, passkeyLoginBeginWindow)
+		n, retryAfter, err := s.rateCounterStore.Increment(ctx, passkeyLoginBeginKeyPrefix+"client:"+clientKey, window)
 		if err != nil {
-			return passkeyLoginStored, err
+			return passkeyLoginStored, 0, err
 		}
-		if int64(n) > s.passkeyLoginSessionClientCapacity() {
-			return passkeyLoginStoreClientCapped, nil
+		windowID = passkeyLoginWindowID(retryAfter, window)
+		// Successes of this window only: the key embeds the window identity, so a success
+		// credited against an earlier window is never read here. The credit can never
+		// exceed the begins counted in its own window, since only a stored ceremony
+		// credits and each is consumed once; min keeps that explicit.
+		ok, _, _, err := s.rateCounterStore.Peek(ctx, passkeyLoginCreditKey(clientKey, windowID), window)
+		if err != nil {
+			return passkeyLoginStored, 0, err
+		}
+		if int64(n)-min(int64(ok), int64(n)) > s.passkeyLoginSessionClientCapacity() {
+			// A refused begin stores no ceremony, so it holds no slot, as on a single
+			// node: give its count back so only stored, unfinished begins remain.
+			s.creditPasskeyLoginBegin(clientKey, windowID)
+			return passkeyLoginStoreClientCapped, 0, nil
 		}
 	}
-	n, _, err := s.rateCounterStore.Increment(ctx, passkeyLoginBeginKeyPrefix+"global", passkeyLoginBeginWindow)
+	n, _, err := s.rateCounterStore.Increment(ctx, passkeyLoginBeginKeyPrefix+"global", window)
 	if err != nil {
-		return passkeyLoginStored, err
+		s.creditPasskeyLoginBegin(clientKey, windowID)
+		return passkeyLoginStored, 0, err
 	}
 	if int64(n) > s.passkeyLoginSessionCapacity() {
-		return passkeyLoginStoreGlobalCapped, nil
+		s.creditPasskeyLoginBegin(clientKey, windowID)
+		return passkeyLoginStoreGlobalCapped, 0, nil
 	}
-	return passkeyLoginStored, nil
+	return passkeyLoginStored, windowID, nil
+}
+
+// creditPasskeyLoginBegin gives back one per-client begin counted in the window named
+// windowID. A no-op when no per-client begin was counted (windowID zero). A store
+// failure is logged and leaves the begin counting, which only errs towards refusing.
+func (s *Server) creditPasskeyLoginBegin(clientKey string, windowID int64) {
+	if clientKey == "" || windowID == 0 {
+		return
+	}
+	_, _, err := s.rateCounterStore.Increment(context.Background(),
+		passkeyLoginCreditKey(clientKey, windowID), s.passkeyLoginBeginWindowDuration())
+	if err != nil {
+		s.logger.Warn("Passkey login begin credit not recorded; the begin keeps counting",
+			"error", logging.SanitizeLogValue(err.Error()))
+	}
+}
+
+// creditPasskeyLoginSuccess gives back the per-client begin that pending's ceremony
+// counted, after the login it began completed (assertion verified and session issued).
+// It credits only pending.clientKey, only against pending.beginWindowID, so a ceremony
+// that finishes after its begin window elapsed credits a key no later begin reads. It
+// credits nothing for a ceremony with no counted begin. Single use per ceremony because
+// takeClusterCeremony consumes the entry atomically. A store failure never fails the
+// login, which has already succeeded: the begin simply keeps counting.
+func (s *Server) creditPasskeyLoginSuccess(pending *passkeyLoginSession) {
+	if !s.webAuthnClusterMode() || s.rateCounterStore == nil {
+		return
+	}
+	s.creditPasskeyLoginBegin(pending.clientKey, pending.beginWindowID)
 }
 
 var errCeremonyCounterUnavailable = errors.New("rate counter store not wired")

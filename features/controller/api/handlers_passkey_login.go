@@ -230,6 +230,9 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	// Issue #6519: the login succeeded, so its begin no longer counts against the
+	// per-client cap. Reached only after the assertion verified and the session issued.
+	s.creditPasskeyLoginSuccess(pending)
 
 	s.emitWebLoginAudit(r.Context(), acct.Username, acct.TenantID, "web.passkey.login.success", business.AuditResultSuccess,
 		softwareAuthenticatorAuditDetails(acct, credential.ID))

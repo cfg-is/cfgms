@@ -16,6 +16,8 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -516,28 +518,44 @@ func TestWebAuthnCluster_ThrottleDeniesAtStoreCapacity(t *testing.T) {
 
 func TestWebAuthnCluster_PerClientBeginCapAcrossNodes(t *testing.T) {
 	f := newClusterFixture(t)
-	a := f.join(setupTestServer(t))
-	b := f.join(setupTestServer(t))
+	a, userA := setupPasskeySessionServer(t)
+	b, userB := setupPasskeySessionServer(t)
+	f.join(a)
+	f.join(b)
 	a.passkeyLoginSessionClientCap = 4
 	b.passkeyLoginSessionClientCap = 4
 	ctx := context.Background()
+	client := loginTestClientKey(a)
 	store := func(s *Server, id, client string) passkeyLoginStoreResult {
 		return s.storePasskeyLoginSession(ctx, id, &passkeyLoginSession{
-			data: specLoginSession(t), expires: time.Now().Add(time.Minute), clientKey: client})
+			data: specLoginSession(t), expires: time.Now().Add(time.Minute), clientKey: client,
+			discoverable: true})
 	}
 
-	assert.Equal(t, passkeyLoginStored, store(a, "c1", "client-1"))
-	assert.Equal(t, passkeyLoginStored, store(b, "c2", "client-1"))
-	assert.Equal(t, passkeyLoginStored, store(a, "c3", "client-1"))
-	assert.Equal(t, passkeyLoginStored, store(b, "c4", "client-1"))
-	assert.Equal(t, passkeyLoginStoreClientCapped, store(a, "c5", "client-1"), "cap is shared across nodes")
-	assert.Equal(t, passkeyLoginStoreClientCapped, store(b, "c6", "client-1"), "cap is shared across nodes")
+	assert.Equal(t, passkeyLoginStored, store(a, "c1", client))
+	assert.Equal(t, passkeyLoginStored, store(b, "c2", client))
+	assert.Equal(t, passkeyLoginStored, store(a, "c3", client))
+	assert.Equal(t, passkeyLoginStored, store(b, "c4", client))
+	assert.Equal(t, passkeyLoginStoreClientCapped, store(a, "c5", client), "cap is shared across nodes")
+	assert.Equal(t, passkeyLoginStoreClientCapped, store(b, "c6", client), "cap is shared across nodes")
 	assert.Equal(t, passkeyLoginStored, store(b, "d1", "client-2"), "another client is unaffected")
 
-	// A finish does not give a slot back: the cap counts begins in the window.
-	_, out := a.takePasskeyLoginSession(ctx, "c1")
-	require.Equal(t, ceremonyOK, out)
-	assert.Equal(t, passkeyLoginStoreClientCapped, store(a, "c7", "client-1"))
+	// A finish that fails does not give a slot back: the cap counts begins in the window
+	// that did not end in a successful login.
+	rec := passkeyFinish(a, "c1", junkBody())
+	require.NotEqual(t, http.StatusOK, rec.Code)
+	assert.Equal(t, passkeyLoginStoreClientCapped, store(a, "c7", client), "a failed finish refunds nothing")
+
+	// A successful finish, on the other node from the begin, does.
+	rec = passkeyFinish(b, "c3", specLoginBody(t, b, userB))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, passkeyLoginStored, store(a, "c8", client), "a successful login gives its slot back")
+	assert.Equal(t, passkeyLoginStoreClientCapped, store(b, "c9", client), "only one slot was given back")
+
+	// Replaying the finished ceremony refunds nothing more.
+	rec = passkeyFinish(a, "c3", specLoginBody(t, a, userA))
+	assert.Equal(t, "NO_ACTIVE_LOGIN_SESSION", errCode(t, rec.Body.Bytes()))
+	assert.Equal(t, passkeyLoginStoreClientCapped, store(a, "c10", client), "a replayed finish refunds nothing")
 }
 
 // --- fail closed ---
@@ -680,4 +698,238 @@ func TestWebAuthnCluster_RelayFieldsRoundTrip(t *testing.T) {
 	sess := &webAuthnPendingSession{expires: time.Now().Add(time.Minute), binding: "p", relayRequestID: "cli-presence-123"}
 	assert.Equal(t, "cli-presence-123", sess.toWire().toSession().relayRequestID)
 	assert.Empty(t, (&webAuthnPendingSession{}).toWire().toSession().relayRequestID)
+}
+
+// --- Issue #6519: a login that succeeds does not count against the per-client begin cap ---
+
+// loginTestClientKey is the client key the begin recorded for requests that httptest
+// builds with its default remote address, which is also the key the finish computes.
+func loginTestClientKey(s *Server) string {
+	return s.clientIPKey(httptest.NewRequest(http.MethodPost, "/", nil))
+}
+
+// beginLoginCeremony stores a discoverable spec-vector ceremony for client on s and
+// returns the store result and the stored session.
+func beginLoginCeremony(t *testing.T, s *Server, id, client string) (passkeyLoginStoreResult, *passkeyLoginSession) {
+	t.Helper()
+	sess := &passkeyLoginSession{data: specLoginSession(t), expires: time.Now().Add(time.Minute),
+		discoverable: true, clientKey: client}
+	return s.storePasskeyLoginSession(context.Background(), id, sess), sess
+}
+
+// loginCreditCount reads the success count recorded for the ceremony's begin window.
+func loginCreditCount(t *testing.T, f *clusterFixture, s *Server, sess *passkeyLoginSession) int {
+	t.Helper()
+	n, _, _, err := f.counters.Peek(context.Background(),
+		passkeyLoginCreditKey(sess.clientKey, sess.beginWindowID), s.passkeyLoginBeginWindowDuration())
+	require.NoError(t, err)
+	return n
+}
+
+func TestWebAuthnCluster_SuccessfulLoginsDoNotCountAgainstClientCap(t *testing.T) {
+	f := newClusterFixture(t)
+	a, userA := setupPasskeySessionServer(t)
+	b, userB := setupPasskeySessionServer(t)
+	f.join(a)
+	f.join(b)
+	client := loginTestClientKey(a)
+	nodes := []struct {
+		srv  *Server
+		user string
+	}{{a, userA}, {b, userB}}
+
+	for i := 0; i < 100; i++ {
+		begin, finish := nodes[i%2], nodes[(i+1)%2]
+		id := "ok-" + strconv.Itoa(i)
+		res, _ := beginLoginCeremony(t, begin.srv, id, client)
+		require.Equal(t, passkeyLoginStored, res, "begin %d", i)
+		rec := passkeyFinish(finish.srv, id, specLoginBody(t, finish.srv, finish.user))
+		require.Equal(t, http.StatusOK, rec.Code, "finish %d body: %s", i, rec.Body.String())
+	}
+}
+
+func TestWebAuthnCluster_AbandonedBeginsReachTheClientCap(t *testing.T) {
+	f := newClusterFixture(t)
+	a := f.join(setupTestServer(t))
+	b := f.join(setupTestServer(t))
+	const limit = 3
+	a.passkeyLoginSessionClientCap = limit
+	b.passkeyLoginSessionClientCap = limit
+
+	for i := 0; i < limit; i++ {
+		res, _ := beginLoginCeremony(t, []*Server{a, b}[i%2], "ab-"+strconv.Itoa(i), "client-1")
+		require.Equal(t, passkeyLoginStored, res, "abandoned begin %d", i)
+	}
+	res, _ := beginLoginCeremony(t, a, "ab-over", "client-1")
+	assert.Equal(t, passkeyLoginStoreClientCapped, res, "the cap+1th abandoned begin is refused")
+	res, _ = beginLoginCeremony(t, b, "other", "client-2")
+	assert.Equal(t, passkeyLoginStored, res, "a second client key is unaffected")
+}
+
+func TestWebAuthnCluster_OnlyAbandonedBeginsCountWhenInterleavedWithSuccesses(t *testing.T) {
+	f := newClusterFixture(t)
+	a, _ := setupPasskeySessionServer(t)
+	b, userB := setupPasskeySessionServer(t)
+	f.join(a)
+	f.join(b)
+	const limit = 3
+	a.passkeyLoginSessionClientCap = limit
+	b.passkeyLoginSessionClientCap = limit
+	client := loginTestClientKey(a)
+
+	// Three successes interleaved with three abandoned begins: the abandoned ones alone
+	// fill the cap, so nothing is refused up to here although there are 6 begins.
+	for i, op := range "SASASA" {
+		id := "mix-" + strconv.Itoa(i)
+		res, _ := beginLoginCeremony(t, a, id, client)
+		require.Equal(t, passkeyLoginStored, res, "begin %d (%c)", i, op)
+		if op == 'S' {
+			rec := passkeyFinish(b, id, specLoginBody(t, b, userB))
+			require.Equal(t, http.StatusOK, rec.Code, "finish %d body: %s", i, rec.Body.String())
+		}
+	}
+	res, _ := beginLoginCeremony(t, b, "mix-over", client)
+	assert.Equal(t, passkeyLoginStoreClientCapped, res, "three abandoned begins are at the cap")
+}
+
+func TestWebAuthnCluster_FailedAndReplayedFinishRefundNothing(t *testing.T) {
+	f := newClusterFixture(t)
+	a, userA := setupPasskeySessionServer(t)
+	b, userB := setupPasskeySessionServer(t)
+	f.join(a)
+	f.join(b)
+	const limit = 3
+	a.passkeyLoginSessionClientCap = limit
+	b.passkeyLoginSessionClientCap = limit
+	client := loginTestClientKey(a)
+
+	// begin 1: failed finish. begin 2: success, then a replay of it. begins 3 and 4:
+	// abandoned. One failed plus two abandoned fill the cap of 3; the 5th begin is refused.
+	res, failed := beginLoginCeremony(t, a, "f-1", client)
+	require.Equal(t, passkeyLoginStored, res)
+	require.NotEqual(t, http.StatusOK, passkeyFinish(b, "f-1", junkBody()).Code)
+	assert.Zero(t, loginCreditCount(t, f, a, failed), "a failed finish credits nothing")
+
+	res, ok := beginLoginCeremony(t, a, "f-2", client)
+	require.Equal(t, passkeyLoginStored, res)
+	rec := passkeyFinish(b, "f-2", specLoginBody(t, b, userB))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, 1, loginCreditCount(t, f, a, ok))
+	rec = passkeyFinish(a, "f-2", specLoginBody(t, a, userA))
+	assert.Equal(t, "NO_ACTIVE_LOGIN_SESSION", errCode(t, rec.Body.Bytes()))
+	assert.Equal(t, 1, loginCreditCount(t, f, a, ok), "a replayed finish credits nothing more")
+
+	for _, id := range []string{"f-3", "f-4"} {
+		res, _ = beginLoginCeremony(t, b, id, client)
+		require.Equal(t, passkeyLoginStored, res, id)
+	}
+	res, _ = beginLoginCeremony(t, a, "f-5", client)
+	assert.Equal(t, passkeyLoginStoreClientCapped, res, "failed + abandoned begins reach the cap")
+}
+
+func TestWebAuthnCluster_MismatchedClientFinishRefundsNothing(t *testing.T) {
+	f := newClusterFixture(t)
+	a, _ := setupPasskeySessionServer(t)
+	b, userB := setupPasskeySessionServer(t)
+	f.join(a)
+	f.join(b)
+	a.passkeyLoginSessionClientCap = 1
+	b.passkeyLoginSessionClientCap = 1
+
+	// A ceremony begun for another client cannot be finished (and so credited) from here.
+	res, sess := beginLoginCeremony(t, a, "mm-1", "client-elsewhere")
+	require.Equal(t, passkeyLoginStored, res)
+	rec := passkeyFinish(b, "mm-1", specLoginBody(t, b, userB))
+	require.NotEqual(t, http.StatusOK, rec.Code)
+	assert.Zero(t, loginCreditCount(t, f, a, sess))
+	res, _ = beginLoginCeremony(t, a, "mm-2", "client-elsewhere")
+	assert.Equal(t, passkeyLoginStoreClientCapped, res)
+}
+
+func TestWebAuthnCluster_SuccessInEarlierWindowDoesNotOffsetLaterWindow(t *testing.T) {
+	f := newClusterFixture(t)
+	a, _ := setupPasskeySessionServer(t)
+	b, userB := setupPasskeySessionServer(t)
+	f.join(a)
+	f.join(b)
+	const limit = 3
+	for _, s := range []*Server{a, b} {
+		s.passkeyLoginSessionClientCap = limit
+		s.passkeyLoginBeginWindowOverride = time.Second
+	}
+	client := loginTestClientKey(a)
+
+	// Window 1: begin a ceremony that will only finish after the window has elapsed.
+	res, late := beginLoginCeremony(t, a, "w-late", client)
+	require.Equal(t, passkeyLoginStored, res)
+	require.NotZero(t, late.beginWindowID)
+	// Two begins in the same window share its identity.
+	res, same := beginLoginCeremony(t, b, "w-same", client)
+	require.Equal(t, passkeyLoginStored, res)
+	require.Equal(t, late.beginWindowID, same.beginWindowID, "one window, one identity")
+
+	time.Sleep(a.passkeyLoginBeginWindowDuration() + 200*time.Millisecond)
+
+	// Window 2: three abandoned begins fill the cap.
+	var windowTwo *passkeyLoginSession
+	for i := 0; i < limit; i++ {
+		res, windowTwo = beginLoginCeremony(t, a, "w2-"+strconv.Itoa(i), client)
+		require.Equal(t, passkeyLoginStored, res, "window 2 begin %d", i)
+	}
+	require.NotEqual(t, late.beginWindowID, windowTwo.beginWindowID, "a new window has a new identity")
+
+	// The window-1 ceremony now finishes successfully. Its credit must not offset window 2.
+	rec := passkeyFinish(b, "w-late", specLoginBody(t, b, userB))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, 1, loginCreditCount(t, f, a, late), "the credit lands on the window the ceremony began in")
+	assert.Zero(t, loginCreditCount(t, f, a, windowTwo), "and not on the current window")
+
+	res, _ = beginLoginCeremony(t, b, "w2-over", client)
+	assert.Equal(t, passkeyLoginStoreClientCapped, res, "a late success must not offset the current window")
+}
+
+// failingCreditCounters fails every write to a success-credit key, like a shared store
+// that errors only for that key.
+type failingCreditCounters struct{ business.RateCounterStore }
+
+func (f failingCreditCounters) Increment(ctx context.Context, key string, window time.Duration) (int, time.Duration, error) {
+	if strings.Contains(key, "client-ok:") {
+		return 0, 0, errors.New("credit write failed")
+	}
+	return f.RateCounterStore.Increment(ctx, key, window)
+}
+
+func TestWebAuthnCluster_CreditWriteFailureDoesNotFailLogin(t *testing.T) {
+	f := newClusterFixture(t)
+	a, userA := setupPasskeySessionServer(t)
+	f.join(a)
+	a.SetRateCounterStore(failingCreditCounters{f.counters})
+	a.passkeyLoginSessionClientCap = 1
+	client := loginTestClientKey(a)
+
+	res, _ := beginLoginCeremony(t, a, "cf-1", client)
+	require.Equal(t, passkeyLoginStored, res)
+	rec := passkeyFinish(a, "cf-1", specLoginBody(t, a, userA))
+	assert.Equal(t, http.StatusOK, rec.Code, "the user is signed in even though the credit was not recorded")
+	res, _ = beginLoginCeremony(t, a, "cf-2", client)
+	assert.Equal(t, passkeyLoginStoreClientCapped, res, "the unrecorded credit leaves the begin counting")
+}
+
+func TestWebAuthnCluster_SingleNodeAndClusterAgreeOnBeginsAndSuccesses(t *testing.T) {
+	const sequence = "SSAASASAAASSAAS"
+	const limit = 3
+
+	single, singleUser := setupPasskeySessionServer(t)
+	single.passkeyLoginSessionClientCap = limit
+	want := runLoginSequence(t, single, singleUser, sequence)
+
+	f := newClusterFixture(t)
+	node, nodeUser := setupPasskeySessionServer(t)
+	f.join(node)
+	node.passkeyLoginSessionClientCap = limit
+	got := runLoginSequence(t, node, nodeUser, sequence)
+
+	assert.Equal(t, want, got)
+	assert.Contains(t, got, passkeyLoginStoreClientCapped, "the sequence must reach the cap")
+	assert.Contains(t, got, passkeyLoginStored)
 }
